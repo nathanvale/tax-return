@@ -72,8 +72,9 @@ Manual bank reconciliation in Xero is tedious, repetitive work. Nathan needs to 
 | `errors.ts` | `getErrorMessage()` from `@side-quest/core/utils` | Safe error-to-string extraction |
 | `export.ts` | `formatCurrency()` from `@side-quest/core/formatters` | Custom AUD formatting |
 | `scripts/xero-auth-server.ts` | `withTimeout()` from `@side-quest/core/concurrency` | Custom 120s server timeout logic |
+| `reconcile.ts` | `withFileLock()` from `@side-quest/core/concurrency` | Custom lock file implementation. Atomic O_EXCL, stale PID detection, auto-cleanup. |
 
-### Project Structure (~12 files)
+### Project Structure (~14 files)
 
 ```
 tax-return/
@@ -83,16 +84,18 @@ tax-return/
 +-- .env.example                   # Template (XERO_CLIENT_ID only - no secret with PKCE)
 +-- .xero-config.json              # Runtime config: tenant ID, org name (gitignored)
 +-- .xero-reconcile-state.json     # Run state for idempotency (gitignored, schema-versioned)
++-- .xero-reconcile-runs/          # Per-execute JSON reports for audit/rollback (gitignored)
 +-- src/
 |   +-- xero/
 |       +-- config.ts              # Load + validate env vars and .xero-config.json
-|       +-- auth.ts                # OAuth2 PKCE flow + token refresh + Keychain
-|       +-- api.ts                 # Xero API client with auth middleware
+|       +-- http.ts                # Raw transport: transportFetch(url, token, options) - no auth logic
+|       +-- auth.ts                # OAuth2 PKCE flow + token refresh + Keychain (uses http.ts for refresh)
+|       +-- api.ts                 # Xero API client: xeroFetch() uses auth token provider + http.ts transport
 |       +-- matcher.ts             # Simple matching: exact amount + contact substring
-|       +-- reconcile.ts           # Orchestration: match, execute, manage state
+|       +-- reconcile.ts           # Orchestration: match, preflight, execute, manage state, audit report
 |       +-- state.ts               # State file via @side-quest/core/fs (includes schemaVersion check on load)
 |       +-- errors.ts              # XeroAuthError, XeroApiError
-|       +-- export.ts              # CSV export for unmatched transactions
+|       +-- export.ts              # CSV export for unmatched transactions (0o600 perms, timestamped)
 +-- tests/
 |   +-- xero/
 |       +-- auth.test.ts
@@ -156,8 +159,9 @@ We filter `BankTransactions` with `IsReconciled==false` to find unreconciled ite
 - **OAuth2 `state` parameter** - cryptographically random, validated in callback to prevent CSRF
 - **Callback server binds to `127.0.0.1:5555`** - not `0.0.0.0`, prevents LAN access. Port 5555 chosen to avoid React/Rails conflicts (port 3000).
 - **Callback server binds port BEFORE opening browser** - If port 5555 is occupied, fail immediately with clear error message.
-- **Callback server timeout** - 120s, auto-shuts down after receiving callback
-- **Scopes minimised** - only `accounting.transactions accounting.contacts accounting.settings offline_access`
+- **Callback server one-shot** - State is single-use (marked consumed after first valid callback). Code parameter validated for presence before exchange. Server stops immediately after first valid callback via `queueMicrotask(() => server.stop())`. Any subsequent request gets 400.
+- **Callback server timeout** - 120s, auto-shuts down if no callback received
+- **Scopes minimised** - `accounting.transactions accounting.contacts offline_access` (accounting.settings removed after audit -- not needed for MVP endpoints)
 - **Logging policy** - NEVER log tokens, authorization codes, or code verifiers. Redact `Authorization` headers in error logs. Safe to log: transaction IDs, amounts, counts, timestamps, error messages (without headers).
 - **Error context sanitization** - NEVER pass request bodies, headers, tokens, codes, or verifiers into error constructor `context`. Only pass safe fields: `message`, `status` (code), `transactionId`, `amount`. This prevents accidental leakage via `StructuredError`'s enumerable `context` property, which Bun's `console.error()` and stack traces will serialize.
 
@@ -245,13 +249,14 @@ class XeroApiError extends StructuredError { /* all other API errors (400, 429, 
 
 **Files:**
 - `src/xero/config.ts` - Load and validate `XERO_CLIENT_ID` from env + `.xero-config.json` for tenant. Fail fast with clear messages.
-- `src/xero/auth.ts` - PKCE flow: `generateCodeVerifier()`, `generateCodeChallenge()`, `getAuthorizationUrl()`, `exchangeCodeForTokens(code, verifier)`, `refreshAccessToken()`. Token storage via macOS `security` CLI + `Bun.spawn()` as single JSON blob. Uses `isTokenExpired()` from `@side-quest/core/oauth` and `generateSecureToken()` from `@side-quest/core/password` for the OAuth2 `state` param. Mutex for refresh. Validates returned scopes after token exchange.
-- `src/xero/api.ts` - Single HTTP client: `xeroFetch()` with auth (via `ensureFreshToken()`), retry (429/503 via `retry()` from `@side-quest/core/utils`), and error handling baked in. Convenience wrapper `xeroPost()` delegates to `xeroFetch()`. Exports `getUnreconciledTransactions(page?)` with Date range filter + `IsReconciled==false`, paginating until `length < 100`.
+- `src/xero/http.ts` - Raw transport layer: `transportFetch(url, token, options)`. No auth logic, no retry, no error mapping. Used by auth.ts for token refresh (avoids circular dependency with api.ts).
+- `src/xero/auth.ts` - PKCE flow: `generateCodeVerifier()`, `generateCodeChallenge()`, `getAuthorizationUrl()`, `exchangeCodeForTokens(code, verifier)`, `refreshAccessToken()`. Token storage via macOS `security` CLI + `Bun.spawn()` with stdin piping (no argv leakage). Uses `isTokenExpired()` from `@side-quest/core/oauth` and `generateSecureToken()` from `@side-quest/core/password` for the OAuth2 `state` param. Mutex for refresh. Validates returned scopes after token exchange. Token refresh uses `transportFetch()` from http.ts (not xeroFetch) to avoid circular imports. **Hard-fails if Keychain unavailable** -- no file-based fallback.
+- `src/xero/api.ts` - Xero API client: `xeroFetch()` uses auth's `ensureFreshToken()` for tokens + `transportFetch()` from http.ts for transport. Adds retry (429/503 via `retry()` from `@side-quest/core/utils`) and error handling. Convenience wrapper `xeroPost()` delegates to `xeroFetch()`. Exports `getUnreconciledTransactions(page?)` with Date range filter + `IsReconciled==false`, paginating until `length < 100`. **No circular dependency** -- auth.ts uses http.ts directly, api.ts uses auth.ts + http.ts.
 - `src/xero/errors.ts` - Typed error hierarchy (XeroAuthError, XeroApiError)
-- `scripts/xero-auth-server.ts` - `Bun.serve()` on `127.0.0.1:5555`, validates `state` param, 120s timeout via `withTimeout()` from `@side-quest/core/concurrency`, returns HTML confirmation page, shuts down via `queueMicrotask(() => server.stop())`
+- `scripts/xero-auth-server.ts` - `Bun.serve()` on `127.0.0.1:5555`. **One-shot callback**: state is single-use (marked consumed after first valid callback), code parameter validated for presence before exchange, server stops immediately after first valid callback via `queueMicrotask(() => server.stop())`, any subsequent request returns 400. 120s timeout via `withTimeout()` from `@side-quest/core/concurrency`. Returns HTML confirmation page.
 - `.env.example` - `XERO_CLIENT_ID=` (no secret needed with PKCE)
 
-**Auth scopes:** `accounting.transactions accounting.contacts accounting.settings offline_access`
+**Auth scopes:** `accounting.transactions accounting.contacts offline_access` (accounting.settings removed -- not needed for MVP endpoints: BankTransactions, Invoices, Payments, Contacts all use accounting.transactions or accounting.contacts)
 
 **Tenant selection:** After first auth, call `GET /connections` to list orgs. Let user choose. Save to `.xero-config.json`.
 
@@ -273,12 +278,20 @@ interface KeychainTokenBundle {
   expiresAt: number
 }
 
-/** Save all tokens as a single atomic Keychain entry */
+/** Save all tokens as a single atomic Keychain entry.
+ *  Pipes JSON via stdin to avoid token leakage in process arguments (ps aux). */
 async function saveTokens(tokens: KeychainTokenBundle): Promise<void> {
   const json = JSON.stringify(tokens)
   const proc = Bun.spawn(['security', 'add-generic-password',
-    '-s', KEYCHAIN_SERVICE, '-a', KEYCHAIN_ACCOUNT, '-w', json, '-U'])
-  await proc.exited
+    '-s', KEYCHAIN_SERVICE, '-a', KEYCHAIN_ACCOUNT, '-U', '-w'], {
+    stdin: 'pipe',
+  })
+  proc.stdin.write(json)
+  proc.stdin.end()
+  const exitCode = await proc.exited
+  if (exitCode !== 0) {
+    throw new XeroAuthError('Failed to save tokens to Keychain. Grant Terminal access: System Settings > Privacy & Security > Keychain Access.')
+  }
 }
 
 /** Load all tokens from a single Keychain entry */
@@ -319,7 +332,7 @@ function getAuthorizationUrl(codeChallenge: string, state: string): string {
     response_type: 'code',
     client_id: config.clientId,
     redirect_uri: 'http://127.0.0.1:5555/callback',
-    scope: 'accounting.transactions accounting.contacts accounting.settings offline_access',
+    scope: 'accounting.transactions accounting.contacts offline_access',
     code_challenge: codeChallenge,
     code_challenge_method: 'S256',
     state,
@@ -381,7 +394,7 @@ async function xeroPost(path: string, body: unknown): Promise<any> {
 }
 ```
 
-**Note:** The `security` CLI requires Terminal to have Keychain access. If denied, fall back to file-based tokens with `chmod 600`.
+**Note:** The `security` CLI requires Terminal to have Keychain access. If denied, **hard-fail** with clear error message explaining how to grant access (System Settings > Privacy & Security > Keychain Access). No file-based fallback -- plaintext tokens on disk are unacceptable for a financial API tool.
 
 **Verification:** Run `/xero-reconcile --auth`, authenticate in browser, confirm tokens stored.
 
@@ -396,11 +409,13 @@ async function xeroPost(path: string, body: unknown): Promise<any> {
   - Returns `Match[]` with confidence: `matched` (exact amount + contact match) or `unmatched` (everything else goes to CSV)
   - Build invoice lookup by amount (Map) for O(1) exact matches
 - `src/xero/reconcile.ts` - Orchestration:
+  - `preflight(config)` - Validates tokens (not expired), tests API connectivity (`GET /Organisation`), checks state path writable. Fails fast with actionable error if any check fails. Runs before `--execute` mode.
   - `categorise(matches, state)` - splits into matched / unmatched / alreadyProcessed
-  - `executeReconciliation(matched, options: { execute: boolean })` - **Safety interlock: throws if `execute` is not explicitly `true`.** This check lives in TypeScript so it applies regardless of whether the caller is the Claude command, a script, or a test. Batch payment creation, state updates, error collection.
+  - `executeReconciliation(matched, options: { execute: boolean })` - **Safety interlock: throws if `execute` is not explicitly `true`.** Wrapped in `withFileLock()` from `@side-quest/core/concurrency` -- concurrent `--execute` runs fail-fast with clear error. Lock only applies to execute mode (dry-run can run in parallel). Includes **server-side pre-check**: before creating each payment, queries Xero for existing payments on the invoice; skips if matching payment already exists (handles crash-gap between API success and state write). Batch payment creation with **per-item error parsing**: deterministic validation failures are reported and skipped (not retried individually). State updates. **Audit report**: writes timestamped JSON to `.xero-reconcile-runs/YYYY-MM-DDTHH-MM-SS-execute.json` with all created payments (IDs, amounts, invoices, Xero deep links) and failures.
+  - **Response validation**: type guard functions validate required fields (PaymentID, InvoiceID, Amount exist and are correct types) before writing to state. Malformed responses throw clear error instead of corrupting state.
   - Partial failure: best-effort with batch reporting
 - `src/xero/state.ts` - `loadState()`, `saveState()`, `markProcessed()`, `isProcessed()`, `getStateSummary()`. Uses `loadJsonStateSync()` and `saveJsonStateSync()` from `@side-quest/core/fs`. On load, checks `schemaVersion` -- if missing or mismatched, warns the user with instructions to back up and reset.
-- `src/xero/export.ts` - `exportUnmatchedAsCsv()` for manual processing. Uses `formatCurrency()` from `@side-quest/core/formatters` for AUD display.
+- `src/xero/export.ts` - `exportUnmatchedAsCsv()` for manual processing. Uses `formatCurrency()` from `@side-quest/core/formatters` for AUD display. **File conventions**: timestamped filename (`xero-unmatched-YYYY-MM-DD.csv`), 0o600 permissions, no silent overwrite (appends time suffix if file exists). CSV pattern added to `.gitignore`.
 - `.claude/commands/xero-reconcile.md` - Single command with flags: `--auth`, `--execute`, `--export`. Dry-run is the default behavior (no flag needed). The `--execute` flag is required to create real payments.
 
 **Simple matching logic:**
@@ -497,14 +512,17 @@ async function createPaymentsBatched(payments: PaymentInput[], batchSize = 50): 
       )
       for (const payment of response.Payments ?? []) {
         if (payment.HasErrors) {
-          results.push({ success: false, errors: payment.ValidationErrors })
+          // Per-item validation errors are deterministic -- report and skip (don't retry individually)
+          results.push({ success: false, errors: payment.ValidationErrors, deterministic: true })
         } else {
+          // Validate response before state mutation
+          assertValidPaymentResponse(payment)
           await state.markProcessed(payment.BankTransactionID, payment.PaymentID)
           results.push({ success: true, payment })
         }
       }
     } catch (error) {
-      // Only fall back to individual creation for validation errors (400/hasErrors).
+      // Only fall back to individual creation for ambiguous/transient batch-level failures.
       // Rate limit (429) and server errors (500/503) already retried above --
       // if still failing, don't cascade into N individual calls.
       if (isRetryableError(error)) {
@@ -514,12 +532,19 @@ async function createPaymentsBatched(payments: PaymentInput[], batchSize = 50): 
         continue
       }
 
-      // Validation error -- fall back to individual calls, throttled to respect 60 req/min
+      // Ambiguous batch failure -- fall back to individual calls, throttled to respect 60 req/min.
+      // Note: per-item validation errors (HasErrors) are already handled above and NOT retried.
       for (const p of batch) {
         try {
-          const response = await xeroPost('/Payments', toXeroPayment(p))
-          await state.markProcessed(p.bankLineId, response.Payments[0].PaymentID)
-          results.push({ success: true, payment: response.Payments[0] })
+          const response = await xeroPost('/Payments?SummarizeErrors=false', toXeroPayment(p))
+          const payment = response.Payments[0]
+          if (payment.HasErrors) {
+            results.push({ success: false, input: p, errors: payment.ValidationErrors, deterministic: true })
+          } else {
+            assertValidPaymentResponse(payment)
+            await state.markProcessed(p.bankLineId, payment.PaymentID)
+            results.push({ success: true, payment })
+          }
         } catch (individualError) {
           results.push({ success: false, input: p, error: individualError })
         }
@@ -530,6 +555,76 @@ async function createPaymentsBatched(payments: PaymentInput[], batchSize = 50): 
   }
   return results
 }
+
+/** Validate payment response has required fields before state mutation.
+ *  Prevents corrupted state from malformed API responses. */
+function assertValidPaymentResponse(payment: unknown): asserts payment is { PaymentID: string; BankTransactionID: string; Amount: number } {
+  if (!payment || typeof payment !== 'object') throw new XeroApiError('Malformed payment response: not an object')
+  const p = payment as Record<string, unknown>
+  if (typeof p.PaymentID !== 'string' || !p.PaymentID) throw new XeroApiError('Malformed payment response: missing PaymentID')
+  if (typeof p.Amount !== 'number') throw new XeroApiError('Malformed payment response: missing Amount')
+}
+```
+
+**Process lock (execute mode only):**
+
+```typescript
+import { withFileLock } from '@side-quest/core/concurrency'
+
+// Only --execute mode acquires the lock. Dry-run can run in parallel.
+async function executeWithLock(fn: () => Promise<void>): Promise<void> {
+  await withFileLock('xero-reconcile-execute', fn, { timeoutMs: 5000 })
+}
+```
+
+**Preflight checks (before execute):**
+
+```typescript
+async function preflight(config: XeroConfig): Promise<void> {
+  // 1. Token validity
+  const tokens = await loadTokens()
+  if (!tokens) throw new XeroAuthError('No tokens found - run --auth first')
+  if (isTokenExpired(tokens.expiresAt)) throw new XeroAuthError('Tokens expired - run --auth to refresh')
+
+  // 2. API connectivity
+  const response = await xeroFetch('/Organisation')
+  if (!response.ok) throw new XeroApiError('Cannot reach Xero API - check network/tenant', { status: response.status })
+
+  // 3. State path writable
+  const statePath = '.xero-reconcile-state.json'
+  try { await Bun.write(statePath, await Bun.file(statePath).text()) }
+  catch { throw new XeroApiError(`State file not writable: ${statePath}`) }
+}
+```
+
+**Exit codes:**
+- `0` - success (all matched items reconciled)
+- `1` - partial success (some items failed, see report)
+- `2` - auth failure (tokens expired or Keychain access denied)
+- `3` - config error (missing env vars, unwritable paths, preflight failure)
+
+**Audit report (per execute run):**
+
+```typescript
+interface ExecuteReport {
+  runId: string
+  timestamp: string
+  paymentsCreated: Array<{
+    paymentId: string
+    invoiceId: string
+    bankTransactionId: string
+    amount: number
+    xeroUrl: string // deep link: https://go.xero.com/Bank/ViewTransaction.aspx?bankTransactionID=...
+  }>
+  failures: Array<{
+    bankTransactionId: string
+    error: string
+    deterministic: boolean
+  }>
+  summary: { total: number; succeeded: number; failed: number }
+}
+
+// Written to .xero-reconcile-runs/YYYY-MM-DDTHH-MM-SS-execute.json with 0o600 perms
 ```
 
 **State file schema:**
@@ -545,11 +640,11 @@ async function createPaymentsBatched(payments: PaymentInput[], batchSize = 50): 
 
 `schemaVersion` is always the first field. On load, `loadState()` checks the version -- if missing or mismatched against the current `SCHEMA_VERSION` constant, it warns the user to back up and reset their state file. This prevents silent data corruption if the schema evolves in future updates.
 
-**Idempotency:**
-- Check local state file first (fast, avoids API call)
-- If not in state file, query Xero for existing payments on the invoice (server-side check)
-- After creating a payment, write to state file immediately via `saveJsonStateSync()` (verified atomic: temp file + rename)
-- On re-run, skip already-processed items and report them
+**Idempotency (two-layer check):**
+1. **Local state file** (fast, avoids API call) -- check `processedTransactions` map first
+2. **Server-side pre-check** (crash recovery) -- before creating each payment, `GET /Payments?Where=Invoice.InvoiceID==guid("...")` to check if a matching payment already exists. If found, update local state and skip. This covers the crash-gap: if process dies between successful API payment creation and state file write, the next run detects the existing payment server-side.
+3. After creating a payment, write to state file immediately via `saveJsonStateSync()` (verified atomic: temp file + rename)
+4. On re-run, skip already-processed items and report them
 
 **Rate limiting:** No dedicated module. `xeroFetch()` has built-in retry for 429/503 (max 3 attempts via `retry()` from `@side-quest/core/utils`) and reads `X-Rate-Limit-Problem` header to identify which limit was hit. It also reads `X-MinLimit-Remaining` and `X-DayLimit-Remaining` headers for proactive warnings when quota is low. `createPaymentsBatched()` adds batch-level retry with `isRetryableError` classifier for 429/500/503. Individual fallback only triggers on validation errors (400) and is throttled at ~55 req/min via `RATE_LIMIT_DELAY_MS` to stay under Xero's 60 req/min limit. When 429 is returned, the `Retry-After` header specifies how many seconds to wait before resuming.
 
@@ -567,7 +662,7 @@ async function createPaymentsBatched(payments: PaymentInput[], batchSize = 50): 
 
 - [ ] Register Xero app at https://developer.xero.com/app/manage/ BEFORE March 2, 2026 using "Auth Code with PKCE" type, redirect URI `http://127.0.0.1:5555/callback`
 - [ ] Copy `XERO_CLIENT_ID` from the registered app into `.env`
-- [ ] Verify scopes `accounting.transactions accounting.contacts accounting.settings offline_access` are accepted by the registered app
+- [ ] Verify scopes `accounting.transactions accounting.contacts offline_access` are accepted by the registered app
 
 ## Acceptance Criteria
 
@@ -591,7 +686,7 @@ async function createPaymentsBatched(payments: PaymentInput[], batchSize = 50): 
 | Granular scopes (post March 2 2026) | MITIGATED if app registered before March 2 | Register Xero app BEFORE March 2, 2026 (see Pre-Implementation Checklist). Apps created before that date use current scope format. |
 | Refresh token lost during rotation | Low | Single JSON blob write is atomic. Previous refresh token saved in same bundle as `refreshTokenPrev`. Try backup on `invalid_grant`. |
 | Payment creation succeeds but auto-match fails | Low | Log payment IDs, provide manual correction instructions |
-| macOS Keychain access denied | Low | Fall back to file-based tokens with `chmod 600`. Prompt user to grant Terminal access. |
+| macOS Keychain access denied | Low | Hard-fail with instructions to grant Terminal Keychain access. No file-based fallback. |
 
 ### YAGNI Items Explicitly Excluded
 
@@ -604,6 +699,7 @@ These are deferred to future plans:
 - ~~OpenAPI type generation (openapi-typescript + openapi-fetch)~~ - See advanced matching plan
 - ~~Rate limiter module~~ - Single user, ~100-200 calls/session. Inline retry on 429 is sufficient.
 - ~~File locking on tokens~~ - Single user, single process. Keychain handles this.
+- ~~Zod/schema validation library~~ - Lightweight type guards are sufficient for MVP. See tech spec for response shapes.
 
 ## Sources & References
 
