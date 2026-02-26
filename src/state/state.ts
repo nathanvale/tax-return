@@ -99,16 +99,20 @@ export class StateBatcher {
 	private readonly processed: Record<string, true>
 	private readonly schemaVersion: number
 	private dirtyCount = 0
+	private flushCount = 0
 	private readonly checkpointInterval: number
+	private readonly onFlush?: (info: { checkpointNumber: number }) => void
 
 	constructor(
 		initial: ReconcileState,
 		checkpointInterval = DEFAULT_CHECKPOINT_INTERVAL,
+		onFlush?: (info: { checkpointNumber: number }) => void,
 	) {
 		this.schemaVersion = initial.schemaVersion
 		// Copy the initial processed map so we own the mutation
 		this.processed = { ...initial.processed }
 		this.checkpointInterval = checkpointInterval
+		this.onFlush = onFlush
 	}
 
 	/** Check if a BankTransactionID has been processed. */

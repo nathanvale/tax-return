@@ -694,6 +694,11 @@ export async function runCli(argv: readonly string[]): Promise<ExitCode> {
 			cliLogger.info('CLI started: {command}', {
 				command: options.command,
 			})
+			const mode = resolveMode(ctx)
+			emitEvent(ctx.eventsConfig, 'xero-cli-started', {
+				command: options.command,
+				mode,
+			})
 			cliLogger.debug('Parsed options: {options}', {
 				options: sanitizeCliOptions(options),
 			})
@@ -754,6 +759,12 @@ export async function runCli(argv: readonly string[]): Promise<ExitCode> {
 					durationMs,
 				},
 			)
+			emitEvent(ctx.eventsConfig, 'xero-cli-completed', {
+				command: options.command,
+				exitCode,
+				durationMs,
+				mode,
+			})
 			return exitCode
 		} catch (err) {
 			const durationMs = Date.now() - startTime
@@ -761,6 +772,12 @@ export async function runCli(argv: readonly string[]): Promise<ExitCode> {
 				cliLogger.info('CLI interrupted: {command} duration={durationMs}ms', {
 					command: options.command,
 					durationMs,
+				})
+				emitEvent(ctx.eventsConfig, 'xero-cli-completed', {
+					command: options.command,
+					exitCode: EXIT_INTERRUPTED,
+					durationMs,
+					mode,
 				})
 				return EXIT_INTERRUPTED
 			}

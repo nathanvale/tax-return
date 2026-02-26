@@ -591,10 +591,13 @@ export async function loadTokens(): Promise<StoredTokens> {
 }
 
 /** Load tokens and refresh if expired (uses refresh lock). */
-export async function loadValidTokens(): Promise<StoredTokens> {
+export async function loadValidTokens(
+	eventsConfig?: EventsConfig,
+): Promise<StoredTokens> {
 	const tokens = await loadTokens()
 	if (!isTokenExpired(tokens.expiresAt)) return tokens
 	authLogger.debug('Token expired, attempting refresh.')
+	const refreshStart = Date.now()
 	return await withRefreshLock(async () => {
 		authLogger.info('Token refresh lock acquired.')
 		const fresh = await authProvider.loadTokens()
@@ -606,6 +609,12 @@ export async function loadValidTokens(): Promise<StoredTokens> {
 		}
 		if (!isTokenExpired(fresh.expiresAt)) {
 			authLogger.debug('Token refreshed by another process, skipping.')
+			if (eventsConfig) {
+				emitEvent(eventsConfig, 'xero-auth-refreshed', {
+					skipped: true,
+					durationMs: Date.now() - refreshStart,
+				})
+			}
 			return fresh
 		}
 		let refreshed: StoredTokens
@@ -615,18 +624,34 @@ export async function loadValidTokens(): Promise<StoredTokens> {
 			authLogger.warn('Token refresh failed: {message}', {
 				message: err instanceof Error ? err.message : String(err),
 			})
+			if (eventsConfig) {
+				emitEvent(eventsConfig, 'xero-auth-refresh-failed', {
+					error: err instanceof Error ? err.message : String(err),
+				})
+			}
 			throw err
 		}
 		try {
 			await authProvider.saveTokens(refreshed)
 		} catch (_err) {
 			authLogger.warn('Token refresh succeeded but failed to save tokens.')
+			if (eventsConfig) {
+				emitEvent(eventsConfig, 'xero-auth-refresh-failed', {
+					error: 'Token refresh succeeded but could not save new tokens',
+				})
+			}
 			throw new XeroAuthError(
 				'Token refresh succeeded but could not save new tokens. Re-auth required.',
 				{ code: 'E_UNAUTHORIZED', recoverable: false },
 			)
 		}
 		authLogger.debug('Token refreshed and saved successfully.')
+		if (eventsConfig) {
+			emitEvent(eventsConfig, 'xero-auth-refreshed', {
+				skipped: false,
+				durationMs: Date.now() - refreshStart,
+			})
+		}
 		return refreshed
 	})
 }
