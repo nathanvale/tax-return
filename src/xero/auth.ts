@@ -447,6 +447,10 @@ async function withRefreshLock<T>(fn: () => Promise<T>): Promise<T> {
 interface AuthWaitOptions {
 	readonly timeoutMs?: number
 	readonly onTick?: (remainingMs: number) => void
+	/** When true, emit auth_url as NDJSON instead of opening a browser.
+	 *  Callers should derive this from OutputContext.headless so there is
+	 *  a single source of truth for headless detection. */
+	readonly headless?: boolean
 }
 
 /** Start the OAuth callback server and return the code promise. */
@@ -549,7 +553,8 @@ export async function authenticate(
 	const state = base64UrlEncode(crypto.getRandomValues(new Uint8Array(16)))
 	const authUrl = buildAuthUrl(challenge, state, scope)
 
-	if (isHeadless()) {
+	const headless = options?.headless ?? isHeadless()
+	if (headless) {
 		const payload = JSON.stringify({ phase: 'auth_url', authUrl })
 		process.stdout.write(`${payload}\n`)
 	} else {

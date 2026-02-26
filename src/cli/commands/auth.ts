@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs'
 import path from 'node:path'
 import { emitEvent } from '../../events'
 import { getXeroLogger } from '../../logging'
-import { authenticate, isHeadless } from '../../xero/auth'
+import { authenticate } from '../../xero/auth'
 import { loadXeroConfig } from '../../xero/config'
 import type { ExitCode, OutputContext } from '../output'
 import {
@@ -84,6 +84,7 @@ export async function runAuth(
 
 		try {
 			await authenticate(scope, {
+				headless: ctx.headless,
 				timeoutMs: options.authTimeoutMs ?? undefined,
 				onTick: (remainingMs) => {
 					if (ctx.json || ctx.quiet) return
@@ -113,7 +114,7 @@ export async function runAuth(
 			[`Authenticated as "${orgName}"`, 'Tenant ID saved to .xero-config.json'],
 			'Authenticated',
 			undefined,
-			isHeadless() ? 'result' : undefined,
+			ctx.headless ? 'result' : undefined,
 		)
 		emitEvent(ctx.eventsConfig, 'xero-auth-completed', {
 			tenantId: config?.tenantId ?? null,
