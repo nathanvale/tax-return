@@ -12,9 +12,10 @@ const TEST_TOKENS = {
 describe('history', () => {
 	const originalFetch = globalThis.fetch
 
-	afterEach(() => {
+	afterEach(async () => {
 		delete process.env.XERO_TEST_TOKENS
 		globalThis.fetch = originalFetch
+		await unlink('.xero-config.json').catch(() => undefined)
 	})
 
 	it('requires --since', async () => {
@@ -83,6 +84,5 @@ describe('history', () => {
 			fields: null,
 		})
 		expect(exitCode).toBe(0)
-		await unlink('.xero-config.json').catch(() => undefined)
 	})
 })

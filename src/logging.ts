@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 import { Writable } from 'node:stream'
 import {
 	configure,
+	dispose,
 	fingersCrossed,
 	getConsoleSink,
 	getLogger,
@@ -61,7 +62,7 @@ export function setupLogging(options: LoggingOptions): void {
 			})
 		: baseSink
 
-	void configure({
+	configure({
 		reset: true,
 		contextLocalStorage: logContext as unknown as AsyncLocalStorage<
 			Record<string, unknown>
@@ -81,18 +82,20 @@ export function setupLogging(options: LoggingOptions): void {
 				lowestLevel: resolveLogLevel(options.logLevel),
 			},
 		],
+	}).catch((err: unknown) => {
+		console.error('[xero] Failed to configure logging:', err)
 	})
 
 	loggingConfigured = true
 }
 
-/** Shut down logging safely (idempotent). */
+/** Shut down logging safely (idempotent). Flushes sinks with a timeout. */
 export async function shutdownLogging(): Promise<void> {
 	if (!loggingConfigured) return
 	loggingConfigured = false
 	const timeoutMs = 500
 	await Promise.race([
-		new Promise<void>((resolve) => setTimeout(resolve, 0)),
+		dispose(),
 		new Promise<void>((resolve) => setTimeout(resolve, timeoutMs)),
 	])
 }

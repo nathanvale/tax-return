@@ -48,11 +48,22 @@ export async function acquireLock(): Promise<void> {
 	}
 
 	const payload: LockPayload = { pid: process.pid, createdAt: Date.now() }
-	await writeFile(lockPath, JSON.stringify(payload), {
-		encoding: 'utf8',
-		mode: LOCK_MODE,
-		flag: 'wx',
-	})
+	try {
+		await writeFile(lockPath, JSON.stringify(payload), {
+			encoding: 'utf8',
+			mode: LOCK_MODE,
+			flag: 'wx',
+		})
+	} catch (error: unknown) {
+		if (
+			error instanceof Error &&
+			'code' in error &&
+			(error as NodeJS.ErrnoException).code === 'EEXIST'
+		) {
+			throw new Error('Another reconcile run is in progress')
+		}
+		throw error
+	}
 }
 
 /** Release the reconcile lock. */

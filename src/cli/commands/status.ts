@@ -5,42 +5,14 @@ import { xeroFetch } from '../../xero/api'
 import { isTokenExpired, loadTokens } from '../../xero/auth'
 import { loadEnvConfig, loadXeroConfig } from '../../xero/config'
 import { XeroAuthError } from '../../xero/errors'
-
-const EXIT_OK = 0
-const EXIT_RUNTIME = 1
-const EXIT_USAGE = 2
-const EXIT_UNAUTHORIZED = 4
-
-type ExitCode = 0 | 1 | 2 | 3 | 4 | 5 | 130
-
-interface OutputContext {
-	readonly json: boolean
-	readonly quiet: boolean
-	readonly logLevel: 'silent' | 'info' | 'debug'
-	readonly progressMode: 'animated' | 'static' | 'off'
-	readonly eventsConfig: ReturnType<
-		typeof import('../../events').resolveEventsConfig
-	>
-}
-
-function writeSuccess<T>(
-	ctx: OutputContext,
-	data: T,
-	humanLines: string[],
-	quietLine: string,
-): void {
-	if (ctx.json) {
-		process.stdout.write(
-			`${JSON.stringify({ status: 'data', schemaVersion: 1, data })}\n`,
-		)
-		return
-	}
-	if (ctx.quiet) {
-		process.stdout.write(`${quietLine}\n`)
-		return
-	}
-	process.stdout.write(`${humanLines.join('\n')}\n`)
-}
+import type { ExitCode, OutputContext } from '../output'
+import {
+	EXIT_OK,
+	EXIT_RUNTIME,
+	EXIT_UNAUTHORIZED,
+	EXIT_USAGE,
+	writeSuccess,
+} from '../output'
 
 interface StatusCheck {
 	readonly name: string

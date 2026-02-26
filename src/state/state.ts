@@ -82,7 +82,7 @@ export async function saveState(state: ReconcileState): Promise<void> {
 	}
 }
 
-/** Mark a BankTransactionID as processed in the state. */
+/** Mark a BankTransactionID as processed in the state (immutable, creates a copy). */
 export function markProcessed(
 	state: ReconcileState,
 	id: string,
@@ -96,4 +96,62 @@ export function markProcessed(
 /** Check if a BankTransactionID has been processed. */
 export function isProcessed(state: ReconcileState, id: string): boolean {
 	return Boolean(state.processed[id])
+}
+
+const DEFAULT_CHECKPOINT_INTERVAL = 50
+
+/**
+ * Batches state updates in memory and flushes to disk periodically.
+ *
+ * Avoids quadratic I/O from per-item markProcessed + saveState calls.
+ * The processed map is mutated in place to avoid O(n^2) spread copies.
+ * State is flushed every `checkpointInterval` dirty items and on explicit flush.
+ */
+export class StateBatcher {
+	private readonly processed: Record<string, true>
+	private readonly schemaVersion: number
+	private dirtyCount = 0
+	private readonly checkpointInterval: number
+
+	constructor(
+		initial: ReconcileState,
+		checkpointInterval = DEFAULT_CHECKPOINT_INTERVAL,
+	) {
+		this.schemaVersion = initial.schemaVersion
+		// Copy the initial processed map so we own the mutation
+		this.processed = { ...initial.processed }
+		this.checkpointInterval = checkpointInterval
+	}
+
+	/** Check if a BankTransactionID has been processed. */
+	isProcessed(id: string): boolean {
+		return Boolean(this.processed[id])
+	}
+
+	/**
+	 * Mark a BankTransactionID as processed.
+	 * Automatically flushes to disk every checkpointInterval items.
+	 */
+	async markProcessed(id: string): Promise<void> {
+		this.processed[id] = true
+		this.dirtyCount += 1
+		if (this.dirtyCount >= this.checkpointInterval) {
+			await this.flush()
+		}
+	}
+
+	/** Persist current state to disk if there are unflushed changes. */
+	async flush(): Promise<void> {
+		if (this.dirtyCount === 0) return
+		await saveState(this.snapshot())
+		this.dirtyCount = 0
+	}
+
+	/** Return a readonly snapshot of the current state. */
+	snapshot(): ReconcileState {
+		return {
+			schemaVersion: this.schemaVersion,
+			processed: { ...this.processed },
+		}
+	}
 }

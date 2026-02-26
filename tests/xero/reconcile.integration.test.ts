@@ -61,15 +61,39 @@ function baseRoutes(
 		{
 			method: 'GET',
 			path: '/BankTransactions',
-			response: {
-				status: 200,
-				body: {
-					BankTransactions: ids.map((id, index) => ({
-						BankTransactionID: id,
-						Type: 'SPEND',
-						Total: totals[index] ?? 0,
-					})),
-				},
+			response: (req) => {
+				const url = new URL(req.url)
+				const idsParam = url.searchParams.get('IDs')
+				// Batch prefetch: return full records for the requested IDs
+				if (idsParam) {
+					const requestedIds = idsParam.split(',')
+					return {
+						status: 200,
+						body: {
+							BankTransactions: requestedIds.map((id) => {
+								const idx = ids.indexOf(id)
+								return {
+									BankTransactionID: id,
+									Type: 'SPEND',
+									Total: idx >= 0 ? (totals[idx] ?? 10) : 10,
+									BankAccount: { AccountID: 'bank-1' },
+									LineItems: [],
+								}
+							}),
+						},
+					}
+				}
+				// Unreconciled snapshot: return the full list
+				return {
+					status: 200,
+					body: {
+						BankTransactions: ids.map((id, index) => ({
+							BankTransactionID: id,
+							Type: 'SPEND',
+							Total: totals[index] ?? 0,
+						})),
+					},
+				}
 			},
 		},
 		{
@@ -107,10 +131,13 @@ function baseRoutes(
 			path: /^\/BankTransactions\//,
 			response: (req) => {
 				const id = new URL(req.url).pathname.split('/').pop() ?? ''
+				const idx = ids.indexOf(id)
 				return {
 					status: 200,
 					body: {
-						BankTransactions: [{ BankTransactionID: id, Total: 10 }],
+						BankTransactions: [
+							{ BankTransactionID: id, Total: idx >= 0 ? (totals[idx] ?? 10) : 10 },
+						],
 					},
 				}
 			},
@@ -236,10 +263,21 @@ describe('reconcile integration scenarios', () => {
 					path: /^\/BankTransactions\//,
 					response: (req) => {
 						const id = new URL(req.url).pathname.split('/').pop() ?? ''
+						const mixedIds = [
+							'11111111-1111-1111-1111-111111111111',
+							'22222222-2222-2222-2222-222222222222',
+							'33333333-3333-3333-3333-333333333333',
+							'44444444-4444-4444-4444-444444444444',
+							'55555555-5555-5555-5555-555555555555',
+						]
+						const mixedTotals = [10, 20, 30, 40, 50]
+						const idx = mixedIds.indexOf(id)
 						return {
 							status: 200,
 							body: {
-								BankTransactions: [{ BankTransactionID: id, Total: 10 }],
+								BankTransactions: [
+									{ BankTransactionID: id, Total: idx >= 0 ? (mixedTotals[idx] ?? 10) : 10 },
+								],
 							},
 						}
 					},
@@ -299,19 +337,17 @@ describe('reconcile integration scenarios', () => {
 			setAuthProvider(new InMemoryAuthProvider(TEST_TOKENS))
 			await writeConfig()
 
+			const resumeIds = [
+				'11111111-1111-1111-1111-111111111111',
+				'22222222-2222-2222-2222-222222222222',
+				'33333333-3333-3333-3333-333333333333',
+				'44444444-4444-4444-4444-444444444444',
+				'55555555-5555-5555-5555-555555555555',
+			]
+			const resumeTotals = [10, 20, 30, 40, 50]
 			let callCount = 0
 			const routes: MockRoute[] = [
-				...baseRoutes(
-					[
-						'11111111-1111-1111-1111-111111111111',
-						'22222222-2222-2222-2222-222222222222',
-						'33333333-3333-3333-3333-333333333333',
-						'44444444-4444-4444-4444-444444444444',
-						'55555555-5555-5555-5555-555555555555',
-					],
-					[10, 20, 30, 40, 50],
-					{ includePost: false },
-				),
+				...baseRoutes(resumeIds, resumeTotals, { includePost: false }),
 				{
 					method: 'POST',
 					path: /^\/BankTransactions\//,
@@ -321,10 +357,13 @@ describe('reconcile integration scenarios', () => {
 							process.emit('SIGINT')
 						}
 						const id = new URL(req.url).pathname.split('/').pop() ?? ''
+						const idx = resumeIds.indexOf(id)
 						return {
 							status: 200,
 							body: {
-								BankTransactions: [{ BankTransactionID: id, Total: 10 }],
+								BankTransactions: [
+									{ BankTransactionID: id, Total: idx >= 0 ? (resumeTotals[idx] ?? 10) : 10 },
+								],
 							},
 						}
 					},
@@ -498,31 +537,50 @@ describe('reconcile integration scenarios', () => {
 			setAuthProvider(new InMemoryAuthProvider(TEST_TOKENS))
 			await writeConfig()
 
+			const invoiceIds = [
+				'11111111-1111-1111-1111-111111111111',
+				'22222222-2222-2222-2222-222222222222',
+				'33333333-3333-3333-3333-333333333333',
+			]
+			const invoiceTotals: Record<string, number> = {
+				'11111111-1111-1111-1111-111111111111': 120,
+				'22222222-2222-2222-2222-222222222222': 80,
+				'33333333-3333-3333-3333-333333333333': 50,
+			}
 			const routes: MockRoute[] = [
 				{
 					method: 'GET',
 					path: '/BankTransactions',
-					response: {
-						status: 200,
-						body: {
-							BankTransactions: [
-								{
-									BankTransactionID: '11111111-1111-1111-1111-111111111111',
-									Type: 'RECEIVE',
-									Total: 120,
+					response: (req) => {
+						const url = new URL(req.url)
+						const idsParam = url.searchParams.get('IDs')
+						// Batch prefetch: return full records for the requested IDs
+						if (idsParam) {
+							const requestedIds = idsParam.split(',')
+							return {
+								status: 200,
+								body: {
+									BankTransactions: requestedIds.map((id) => ({
+										BankTransactionID: id,
+										Type: 'RECEIVE',
+										Total: invoiceTotals[id] ?? 10,
+										BankAccount: { AccountID: 'bank-1' },
+										LineItems: [],
+									})),
 								},
-								{
-									BankTransactionID: '22222222-2222-2222-2222-222222222222',
+							}
+						}
+						// Unreconciled snapshot
+						return {
+							status: 200,
+							body: {
+								BankTransactions: invoiceIds.map((id) => ({
+									BankTransactionID: id,
 									Type: 'RECEIVE',
-									Total: 80,
-								},
-								{
-									BankTransactionID: '33333333-3333-3333-3333-333333333333',
-									Type: 'RECEIVE',
-									Total: 50,
-								},
-							],
-						},
+									Total: invoiceTotals[id] ?? 10,
+								})),
+							},
+						}
 					},
 				},
 				{
@@ -573,7 +631,8 @@ describe('reconcile integration scenarios', () => {
 								BankTransactions: [
 									{
 										BankTransactionID: id,
-										Total: 10,
+										Type: 'RECEIVE',
+										Total: invoiceTotals[id] ?? 10,
 										BankAccount: { AccountID: 'bank-1' },
 										LineItems: [],
 									},
@@ -776,6 +835,158 @@ describe('reconcile integration scenarios', () => {
 				},
 				() => undefined,
 			)
+		})
+	})
+
+	it('paginates unreconciled snapshot across multiple pages', async () => {
+		await withTempDir(async () => {
+			setAuthProvider(new InMemoryAuthProvider(TEST_TOKENS))
+			await writeConfig()
+
+			// ID on page 1
+			const page1Id = '11111111-1111-1111-1111-111111111111'
+			// ID on page 2 -- this would be missed without pagination
+			const page2Id = '22222222-2222-2222-2222-222222222222'
+
+			// Build exactly 100 filler IDs for page 1 so pagination triggers
+			const page1Filler = Array.from({ length: 99 }, (_, i) => {
+				const hex = (i + 1).toString(16).padStart(8, '0')
+				return `${hex}-0000-0000-0000-000000000000`
+			})
+			const page1Ids = [page1Id, ...page1Filler]
+
+			const routes: MockRoute[] = [
+				{
+					method: 'GET',
+					path: '/BankTransactions',
+					response: (req) => {
+						const url = new URL(req.url)
+						const idsParam = url.searchParams.get('IDs')
+						// Batch prefetch: return full records for the requested IDs
+						if (idsParam) {
+							const requestedIds = idsParam.split(',')
+							return {
+								status: 200,
+								body: {
+									BankTransactions: requestedIds.map((id) => ({
+										BankTransactionID: id,
+										Total: id === page2Id ? 25 : 10,
+										BankAccount: { AccountID: 'bank-1' },
+										LineItems: [{ AccountCode: '400' }],
+									})),
+								},
+							}
+						}
+						// Paginated unreconciled snapshot
+						const page = url.searchParams.get('page') ?? '1'
+						if (page === '1') {
+							return {
+								status: 200,
+								body: {
+									BankTransactions: page1Ids.map((id) => ({
+										BankTransactionID: id,
+										Type: 'SPEND',
+										Total: 10,
+									})),
+								},
+							}
+						}
+						if (page === '2') {
+							return {
+								status: 200,
+								body: {
+									BankTransactions: [{ BankTransactionID: page2Id, Type: 'SPEND', Total: 25 }],
+								},
+							}
+						}
+						return { status: 200, body: { BankTransactions: [] } }
+					},
+				},
+				{
+					method: 'GET',
+					path: '/Accounts',
+					response: {
+						status: 200,
+						body: { Accounts: [{ Code: '400', Status: 'ACTIVE' }] },
+					},
+				},
+				{
+					method: 'GET',
+					path: /^\/BankTransactions\//,
+					response: (req) => {
+						const id = new URL(req.url).pathname.split('/').pop() ?? ''
+						return {
+							status: 200,
+							body: {
+								BankTransactions: [
+									{
+										BankTransactionID: id,
+										Total: id === page2Id ? 25 : 10,
+										BankAccount: { AccountID: 'bank-1' },
+										LineItems: [{ AccountCode: '400' }],
+									},
+								],
+							},
+						}
+					},
+				},
+				{
+					method: 'POST',
+					path: /^\/BankTransactions\//,
+					response: (req) => {
+						const id = new URL(req.url).pathname.split('/').pop() ?? ''
+						return {
+							status: 200,
+							body: {
+								BankTransactions: [{ BankTransactionID: id, Total: 10 }],
+							},
+						}
+					},
+				},
+			]
+
+			const server = createXeroMockServer(routes)
+			process.env.XERO_API_BASE_URL = server.url
+
+			// Input references the page-2 ID which would fail without pagination
+			const input = JSON.stringify([
+				{
+					BankTransactionID: page2Id,
+					AccountCode: '400',
+				},
+			])
+
+			const original = Bun.stdin.stream
+			;(Bun.stdin as any).stream = () =>
+				new ReadableStream({
+					start(controller) {
+						controller.enqueue(new TextEncoder().encode(input))
+						controller.close()
+					},
+				})
+
+			const capture = captureStdout()
+			const exitCode = await runReconcile(
+				{
+					json: true,
+					quiet: true,
+					logLevel: 'silent',
+					progressMode: 'off',
+					eventsConfig: resolveEventsConfig(),
+				},
+				{ command: 'reconcile', execute: false, fromCsv: null },
+			)
+			capture.restore()
+			;(Bun.stdin as any).stream = original
+			server.stop()
+
+			// The page-2 ID should be accepted, not rejected as invalid
+			expect(exitCode).toBe(0)
+			const payload = JSON.parse(capture.getStdout())
+			const results = payload.data.results
+			expect(results).toHaveLength(1)
+			expect(results[0].BankTransactionID).toBe(page2Id)
+			expect(results[0].status).not.toBe('error')
 		})
 	})
 })

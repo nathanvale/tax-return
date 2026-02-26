@@ -208,19 +208,3 @@ export async function xeroFetch<T>(
 		}
 	}
 }
-
-/** POST helper that returns unknown so callers must validate. */
-export async function xeroPost(
-	path: string,
-	body: Record<string, unknown>,
-	options: XeroFetchOptions,
-): Promise<unknown> {
-	return await xeroFetch<unknown>(
-		path,
-		{
-			method: 'POST',
-			body: JSON.stringify(body),
-		},
-		options,
-	)
-}

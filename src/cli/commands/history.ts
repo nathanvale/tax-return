@@ -1,28 +1,17 @@
 import { xeroFetch } from '../../xero/api'
 import { loadValidTokens } from '../../xero/auth'
 import { loadEnvConfig, loadXeroConfig } from '../../xero/config'
+import { escapeODataValue } from '../../xero/odata'
+import type { ExitCode, OutputContext } from '../output'
 import {
-	XeroApiError,
-	XeroAuthError,
-	XeroConflictError,
-} from '../../xero/errors'
-
-const EXIT_OK = 0
-const EXIT_RUNTIME = 1
-const EXIT_USAGE = 2
-const EXIT_UNAUTHORIZED = 4
-
-type ExitCode = 0 | 1 | 2 | 3 | 4 | 5 | 130
-
-interface OutputContext {
-	readonly json: boolean
-	readonly quiet: boolean
-	readonly logLevel: 'silent' | 'info' | 'debug'
-	readonly progressMode: 'animated' | 'static' | 'off'
-	readonly eventsConfig: ReturnType<
-		typeof import('../../events').resolveEventsConfig
-	>
-}
+	EXIT_OK,
+	EXIT_UNAUTHORIZED,
+	EXIT_USAGE,
+	handleCommandError,
+	projectFields,
+	writeError,
+	writeSuccess,
+} from '../output'
 
 interface HistoryCommand {
 	readonly command: 'history'
@@ -62,89 +51,6 @@ interface HistorySuccessData {
 	readonly command: 'history'
 	readonly count: number
 	readonly transactions: HistoryRow[]
-}
-
-const ERROR_CODE_ACTIONS: Record<
-	string,
-	{ action: string; retryable: boolean }
-> = {
-	E_RUNTIME: { action: 'ESCALATE', retryable: false },
-	E_USAGE: { action: 'FIX_ARGS', retryable: false },
-	E_UNAUTHORIZED: { action: 'RUN_AUTH', retryable: false },
-	E_CONFLICT: { action: 'WAIT_AND_RETRY', retryable: true },
-}
-
-function writeSuccess<T>(
-	ctx: OutputContext,
-	data: T,
-	humanLines: string[],
-	quietLine: string,
-): void {
-	if (ctx.json) {
-		process.stdout.write(
-			`${JSON.stringify({ status: 'data', schemaVersion: 1, data })}\n`,
-		)
-		return
-	}
-	if (ctx.quiet) {
-		process.stdout.write(`${quietLine}\n`)
-		return
-	}
-	process.stdout.write(`${humanLines.join('\n')}\n`)
-}
-
-function writeError(
-	ctx: OutputContext,
-	message: string,
-	errorCode: string,
-	errorName: string,
-	context?: Record<string, unknown>,
-): void {
-	if (ctx.json) {
-		const fallback = { action: 'ESCALATE', retryable: false }
-		const action = ERROR_CODE_ACTIONS[errorCode] ?? fallback
-		const errorPayload: Record<string, unknown> = {
-			name: errorName,
-			code: errorCode,
-			action: action.action,
-			retryable: action.retryable,
-		}
-		if (context) errorPayload.context = context
-		process.stderr.write(
-			`${JSON.stringify({
-				status: 'error',
-				message,
-				error: errorPayload,
-			})}\n`,
-		)
-		return
-	}
-	const line = ctx.quiet ? message : `[xero-cli] ${message}`
-	process.stderr.write(`${line}\n`)
-}
-
-function projectFields<T extends Record<string, unknown>>(
-	records: T[],
-	fields: readonly string[] | null,
-): Record<string, unknown>[] {
-	if (!fields) return records
-	return records.map((record) => {
-		const projected: Record<string, unknown> = {}
-		for (const field of fields) {
-			const parts = field.split('.')
-			let value: unknown = record
-			for (const part of parts) {
-				if (value && typeof value === 'object' && part in value) {
-					value = (value as Record<string, unknown>)[part]
-				} else {
-					value = undefined
-					break
-				}
-			}
-			projected[field] = value
-		}
-		return projected
-	})
 }
 
 function groupHistory(transactions: BankTransactionRecord[]): HistoryRow[] {
@@ -221,10 +127,12 @@ export async function runHistory(
 			`Date>=DateTime(${options.since.split('-').join(',')})`,
 		]
 		if (options.contact) {
-			whereClauses.push(`Contact.Name=="${options.contact}"`)
+			whereClauses.push(`Contact.Name=="${escapeODataValue(options.contact)}"`)
 		}
 		if (options.accountCode) {
-			whereClauses.push(`LineItems.AccountCode=="${options.accountCode}"`)
+			whereClauses.push(
+				`LineItems.AccountCode=="${escapeODataValue(options.accountCode)}"`,
+			)
 		}
 		const params = new URLSearchParams()
 		params.set('where', whereClauses.join(' && '))
@@ -258,20 +166,6 @@ export async function runHistory(
 		)
 		return EXIT_OK
 	} catch (err) {
-		if (err instanceof XeroAuthError) {
-			writeError(ctx, err.message, err.code, err.name, err.context)
-			return EXIT_UNAUTHORIZED
-		}
-		if (err instanceof XeroConflictError || err instanceof XeroApiError) {
-			writeError(ctx, err.message, err.code, err.name, err.context)
-			return EXIT_RUNTIME
-		}
-		writeError(
-			ctx,
-			err instanceof Error ? err.message : String(err),
-			'E_RUNTIME',
-			'RuntimeError',
-		)
-		return EXIT_RUNTIME
+		return handleCommandError(ctx, err)
 	}
 }

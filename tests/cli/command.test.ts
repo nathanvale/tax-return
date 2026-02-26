@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
 import { configure, getConsoleSink } from '@logtape/logtape'
-import { runCli } from '../../src/cli/command'
+import { parseCli, runCli } from '../../src/cli/command'
 
 interface Capture {
 	readonly getStdout: () => string
@@ -83,5 +83,82 @@ describe('cli output invariants', () => {
 
 		expect(exitCode).toBe(0)
 		expect(capture.getStderr()).toBe('')
+	})
+})
+
+describe('--fields flag routing', () => {
+	it('rejects --fields for reconcile command', () => {
+		const result = parseCli(['node', 'xero-cli', 'reconcile', '--fields', 'Total', '--json'])
+		expect(result.ok).toBe(false)
+		if (!result.ok) {
+			expect(result.message).toContain('--fields is only valid for list commands')
+		}
+	})
+
+	it('rejects --fields for help command', () => {
+		const result = parseCli(['node', 'xero-cli', 'help', '--fields', 'Total'])
+		expect(result.ok).toBe(false)
+		if (!result.ok) {
+			expect(result.message).toContain('--fields is only valid for list commands')
+		}
+	})
+
+	it('accepts --fields for accounts command', () => {
+		const result = parseCli(['node', 'xero-cli', 'accounts', '--fields', 'Code,Name', '--json'])
+		expect(result.ok).toBe(true)
+		if (result.ok) {
+			expect(result.options.command).toBe('accounts')
+			expect(result.options).toHaveProperty('fields', ['Code', 'Name'])
+		}
+	})
+
+	it('accepts --fields for transactions command', () => {
+		const result = parseCli([
+			'node',
+			'xero-cli',
+			'transactions',
+			'--fields',
+			'Total,Contact',
+			'--json',
+		])
+		expect(result.ok).toBe(true)
+		if (result.ok) {
+			expect(result.options.command).toBe('transactions')
+			expect(result.options).toHaveProperty('fields', ['Total', 'Contact'])
+		}
+	})
+
+	it('accepts --fields for history command', () => {
+		const result = parseCli([
+			'node',
+			'xero-cli',
+			'history',
+			'--since',
+			'2025-01-01',
+			'--fields',
+			'Contact,Count',
+			'--json',
+		])
+		expect(result.ok).toBe(true)
+		if (result.ok) {
+			expect(result.options.command).toBe('history')
+			expect(result.options).toHaveProperty('fields', ['Contact', 'Count'])
+		}
+	})
+
+	it('accepts --fields for invoices command', () => {
+		const result = parseCli([
+			'node',
+			'xero-cli',
+			'invoices',
+			'--fields',
+			'InvoiceID,Total',
+			'--json',
+		])
+		expect(result.ok).toBe(true)
+		if (result.ok) {
+			expect(result.options.command).toBe('invoices')
+			expect(result.options).toHaveProperty('fields', ['InvoiceID', 'Total'])
+		}
 	})
 })

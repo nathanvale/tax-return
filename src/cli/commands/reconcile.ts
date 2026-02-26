@@ -1,36 +1,25 @@
 import { existsSync } from 'node:fs'
-import {
-	appendFile,
-	mkdir,
-	readdir,
-	stat,
-	unlink,
-	writeFile,
-} from 'node:fs/promises'
+import type { FileHandle } from 'node:fs/promises'
+import { mkdir, open, readdir, stat, unlink, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { z } from 'zod'
 import { emitEvent } from '../../events'
 import { acquireLock, releaseLock } from '../../state/lock'
-import {
-	isProcessed,
-	loadState,
-	markProcessed,
-	saveState,
-} from '../../state/state'
+import { loadState, StateBatcher } from '../../state/state'
 import { xeroFetch } from '../../xero/api'
 import { loadValidTokens } from '../../xero/auth'
 import { loadEnvConfig, loadXeroConfig } from '../../xero/config'
+import { XeroConflictError } from '../../xero/errors'
+import type { ExitCode, OutputContext } from '../output'
 import {
-	XeroApiError,
-	XeroAuthError,
-	XeroConflictError,
-} from '../../xero/errors'
-
-const EXIT_OK = 0
-const EXIT_RUNTIME = 1
-const EXIT_USAGE = 2
-const EXIT_UNAUTHORIZED = 4
-const EXIT_INTERRUPTED = 130
+	EXIT_INTERRUPTED,
+	EXIT_OK,
+	EXIT_UNAUTHORIZED,
+	EXIT_USAGE,
+	handleCommandError,
+	writeError,
+	writeSuccess,
+} from '../output'
 
 const MAX_STDIN_BYTES = 5 * 1024 * 1024
 const AUDIT_DIR = '.xero-reconcile-runs'
@@ -39,18 +28,6 @@ const AUDIT_DIR_MODE = 0o700
 const UUID_SHAPE =
 	/^[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}$/
 const ACCOUNT_CODE_SHAPE = /^[A-Za-z0-9]{1,10}$/
-
-type ExitCode = 0 | 1 | 2 | 3 | 4 | 5 | 130
-
-interface OutputContext {
-	readonly json: boolean
-	readonly quiet: boolean
-	readonly logLevel: 'silent' | 'info' | 'debug'
-	readonly progressMode: 'animated' | 'static' | 'off'
-	readonly eventsConfig: ReturnType<
-		typeof import('../../events').resolveEventsConfig
-	>
-}
 
 interface ReconcileCommand {
 	readonly command: 'reconcile'
@@ -189,65 +166,6 @@ interface RetryInfo {
 	readonly status?: number
 }
 
-const ERROR_CODE_ACTIONS: Record<
-	string,
-	{ action: string; retryable: boolean }
-> = {
-	E_RUNTIME: { action: 'ESCALATE', retryable: false },
-	E_USAGE: { action: 'FIX_ARGS', retryable: false },
-	E_UNAUTHORIZED: { action: 'RUN_AUTH', retryable: false },
-	E_CONFLICT: { action: 'WAIT_AND_RETRY', retryable: true },
-}
-
-function writeSuccess<T>(
-	ctx: OutputContext,
-	data: T,
-	humanLines: string[],
-	quietLine: string,
-): void {
-	if (ctx.json) {
-		process.stdout.write(
-			`${JSON.stringify({ status: 'data', schemaVersion: 1, data })}\n`,
-		)
-		return
-	}
-	if (ctx.quiet) {
-		process.stdout.write(`${quietLine}\n`)
-		return
-	}
-	process.stdout.write(`${humanLines.join('\n')}\n`)
-}
-
-function writeError(
-	ctx: OutputContext,
-	message: string,
-	errorCode: string,
-	errorName: string,
-	context?: Record<string, unknown>,
-): void {
-	if (ctx.json) {
-		const fallback = { action: 'ESCALATE', retryable: false }
-		const action = ERROR_CODE_ACTIONS[errorCode] ?? fallback
-		const errorPayload: Record<string, unknown> = {
-			name: errorName,
-			code: errorCode,
-			action: action.action,
-			retryable: action.retryable,
-		}
-		if (context) errorPayload.context = context
-		process.stderr.write(
-			`${JSON.stringify({
-				status: 'error',
-				message,
-				error: errorPayload,
-			})}\n`,
-		)
-		return
-	}
-	const line = ctx.quiet ? message : `[xero-cli] ${message}`
-	process.stderr.write(`${line}\n`)
-}
-
 /** Validate BankTransaction API responses before mutating state. */
 export function assertValidBankTransactionResponse(
 	response: BankTransactionsResponse,
@@ -348,17 +266,85 @@ async function readStdinWithLimit(): Promise<string> {
 	return Buffer.concat(chunks).toString('utf8')
 }
 
-function parseCsvLine(line: string): string[] {
-	return line.split(',').map((part) => part.trim())
+/**
+ * Parse a single CSV line per RFC-4180.
+ *
+ * Handles quoted fields containing commas and escaped double-quotes (`""`).
+ * Only splits on commas that appear outside of quoted regions.
+ */
+export function parseCsvLine(line: string): string[] {
+	const fields: string[] = []
+	let current = ''
+	let inQuotes = false
+	let i = 0
+
+	while (i < line.length) {
+		const ch = line[i] as string
+
+		if (inQuotes) {
+			if (ch === '"') {
+				// Peek ahead: escaped quote ("") or end of quoted field
+				if (i + 1 < line.length && line[i + 1] === '"') {
+					current += '"'
+					i += 2
+				} else {
+					inQuotes = false
+					i += 1
+				}
+			} else {
+				current += ch
+				i += 1
+			}
+		} else {
+			if (ch === '"') {
+				inQuotes = true
+				i += 1
+			} else if (ch === ',') {
+				fields.push(current.trim())
+				current = ''
+				i += 1
+			} else {
+				current += ch
+				i += 1
+			}
+		}
+	}
+
+	// Push the final field
+	fields.push(current.trim())
+
+	return fields
+}
+
+/**
+ * Validate that a CSV path is safe to read.
+ *
+ * Prevents path traversal attacks by ensuring the resolved path stays within
+ * the allowed base directory (defaults to cwd) and has a .csv extension.
+ * In the agent-native context, a compromised agent could otherwise pass
+ * arbitrary paths like /etc/passwd via --from-csv.
+ */
+export function validateCsvPath(pathname: string, baseDir?: string): void {
+	const resolved = path.resolve(pathname)
+	const allowed = baseDir ?? process.cwd()
+
+	if (!resolved.startsWith(`${allowed}${path.sep}`) && resolved !== allowed) {
+		throw new Error(`CSV path must be within ${allowed} -- got ${resolved}`)
+	}
+
+	if (path.extname(resolved).toLowerCase() !== '.csv') {
+		throw new Error('CSV path must have a .csv extension')
+	}
 }
 
 async function loadCsv(pathname: string): Promise<ReconcileInputBase[]> {
+	validateCsvPath(pathname)
 	const raw = await Bun.file(pathname).text()
 	const lines = raw.split(/\r?\n/).filter((line) => line.trim().length > 0)
 	if (lines.length === 0) throw new Error('CSV is empty')
 	const firstLine = lines[0] as string
 	const header = parseCsvLine(firstLine)
-	const required = ['BankTransactionID', 'AccountCode']
+	const required = ['BankTransactionID']
 	for (const col of required) {
 		if (!header.includes(col)) {
 			throw new Error(`CSV missing required column: ${col}`)
@@ -371,10 +357,10 @@ async function loadCsv(pathname: string): Promise<ReconcileInputBase[]> {
 		header.forEach((key, idx) => {
 			record[key] = values[idx] ?? ''
 		})
-		if (!record.BankTransactionID || !record.AccountCode) continue
+		if (!record.BankTransactionID) continue
 		inputs.push({
 			BankTransactionID: record.BankTransactionID,
-			AccountCode: record.AccountCode,
+			AccountCode: record.AccountCode || undefined,
 			InvoiceID: record.InvoiceID || undefined,
 			Amount: record.Amount ? Number(record.Amount) : undefined,
 			CurrencyCode: record.CurrencyCode || undefined,
@@ -413,14 +399,61 @@ async function createAuditFile(auditPath: string): Promise<void> {
 	})
 }
 
-async function writeAuditLine(
-	auditPath: string,
-	payload: Record<string, unknown>,
-): Promise<void> {
-	const line = `${JSON.stringify(payload)}\n`
-	await appendFile(auditPath, line, { encoding: 'utf8' })
+const AUDIT_FLUSH_THRESHOLD = 50
+
+/**
+ * Buffered audit writer that keeps a single file handle open for the
+ * duration of a reconciliation run. Entries are buffered in memory and
+ * flushed every AUDIT_FLUSH_THRESHOLD items (and on close) to avoid
+ * per-item open/seek/write/close cycles.
+ */
+class AuditWriter {
+	private handle: FileHandle | null = null
+	private buffer: string[] = []
+	private readonly path: string
+
+	constructor(auditPath: string) {
+		this.path = auditPath
+	}
+
+	/** Open the file handle for appending. Must be called before write(). */
+	async open(): Promise<void> {
+		this.handle = await open(this.path, 'a')
+	}
+
+	/** Buffer an audit entry and flush when the threshold is reached. */
+	async write(payload: Record<string, unknown>): Promise<void> {
+		this.buffer.push(JSON.stringify(payload))
+		if (this.buffer.length >= AUDIT_FLUSH_THRESHOLD) {
+			await this.flush()
+		}
+	}
+
+	/** Flush any buffered entries to disk. */
+	async flush(): Promise<void> {
+		if (this.buffer.length === 0 || !this.handle) return
+		const data = `${this.buffer.join('\n')}\n`
+		this.buffer = []
+		await this.handle.write(data, null, 'utf8')
+	}
+
+	/** Flush remaining entries and close the file handle. */
+	async close(): Promise<void> {
+		await this.flush()
+		if (this.handle) {
+			await this.handle.close()
+			this.handle = null
+		}
+	}
 }
 
+/**
+ * Fetch all unreconciled bank transactions across all pages.
+ *
+ * Xero returns at most 100 records per page. We loop with an
+ * incrementing `page` parameter until a page returns fewer items
+ * than the page size, which signals the end of results.
+ */
 async function fetchUnreconciledSnapshot(
 	accessToken: string,
 	tenantId: string,
@@ -429,24 +462,33 @@ async function fetchUnreconciledSnapshot(
 		readonly onRetry?: (info: RetryInfo) => void
 	},
 ): Promise<Map<string, { Type?: string; Total?: number }>> {
-	const response = await xeroFetch<BankTransactionsResponse>(
-		'/BankTransactions?where=IsReconciled==false',
-		{ method: 'GET' },
-		{
-			accessToken,
-			tenantId,
-			eventsConfig: options.eventsConfig,
-			onRetry: options.onRetry,
-		},
-	)
+	const PAGE_SIZE = 100
 	const snapshot = new Map<string, { Type?: string; Total?: number }>()
-	for (const txn of response.BankTransactions ?? []) {
-		if (!txn.BankTransactionID) continue
-		snapshot.set(txn.BankTransactionID, {
-			Type: txn.Type,
-			Total: txn.Total,
-		})
+	let page = 1
+
+	while (true) {
+		const response = await xeroFetch<BankTransactionsResponse>(
+			`/BankTransactions?where=IsReconciled==false&page=${page}`,
+			{ method: 'GET' },
+			{
+				accessToken,
+				tenantId,
+				eventsConfig: options.eventsConfig,
+				onRetry: options.onRetry,
+			},
+		)
+		const transactions = response.BankTransactions ?? []
+		for (const txn of transactions) {
+			if (!txn.BankTransactionID) continue
+			snapshot.set(txn.BankTransactionID, {
+				Type: txn.Type,
+				Total: txn.Total,
+			})
+		}
+		if (transactions.length < PAGE_SIZE) break
+		page += 1
 	}
+
 	return snapshot
 }
 
@@ -496,6 +538,45 @@ async function fetchBankTransaction(
 		},
 	)
 	return assertValidBankTransactionResponse(response)
+}
+
+/**
+ * Batch-fetch full BankTransaction records by IDs to avoid N+1 API calls.
+ *
+ * Uses the Xero IDs filter parameter, fetching in chunks of 50 (matching
+ * the invoice prefetch pattern). Returns a Map keyed by BankTransactionID.
+ */
+async function fetchBankTransactionsBatch(
+	accessToken: string,
+	tenantId: string,
+	ids: string[],
+	options: {
+		readonly eventsConfig: OutputContext['eventsConfig']
+		readonly onRetry?: (info: RetryInfo) => void
+	},
+): Promise<Map<string, BankTransactionRecord>> {
+	const byId = new Map<string, BankTransactionRecord>()
+	if (ids.length === 0) return byId
+	const chunkSize = 50
+	for (let i = 0; i < ids.length; i += chunkSize) {
+		const batch = ids.slice(i, i + chunkSize)
+		const response = await xeroFetch<BankTransactionsResponse>(
+			`/BankTransactions?IDs=${batch.join(',')}`,
+			{ method: 'GET' },
+			{
+				accessToken,
+				tenantId,
+				eventsConfig: options.eventsConfig,
+				onRetry: options.onRetry,
+			},
+		)
+		for (const txn of response.BankTransactions ?? []) {
+			if (txn.BankTransactionID) {
+				byId.set(txn.BankTransactionID, txn)
+			}
+		}
+	}
+	return byId
 }
 
 async function updateBankTransaction(
@@ -637,14 +718,15 @@ export async function runReconcile(
 			inputs = parseJsonInput(raw)
 		}
 
-		const auditPath = options.execute
-			? path.join(
-					await ensureAuditDir(),
-					`${new Date().toISOString().replace(/[:.]/g, '-')}.ndjson`,
-				)
-			: null
-		if (auditPath) {
+		let auditWriter: AuditWriter | null = null
+		if (options.execute) {
+			const auditPath = path.join(
+				await ensureAuditDir(),
+				`${new Date().toISOString().replace(/[:.]/g, '-')}.ndjson`,
+			)
 			await createAuditFile(auditPath)
+			auditWriter = new AuditWriter(auditPath)
+			await auditWriter.open()
 		}
 
 		const retryHandler = (info: RetryInfo) => {
@@ -697,9 +779,26 @@ export async function runReconcile(
 					})
 				: new Map()
 
+		// Batch prefetch all BankTransaction records needed for reconciliation.
+		// Both AccountCode and InvoiceID paths require the full record (for
+		// LineItems and BankAccount.AccountID respectively). This eliminates
+		// the N+1 pattern where each item triggered an individual GET request.
+		const idsNeedingFullRecord = inputs
+			.filter((input) => input.AccountCode || input.InvoiceID)
+			.map((input) => input.BankTransactionID)
+		const bankTxnById =
+			idsNeedingFullRecord.length > 0
+				? await fetchBankTransactionsBatch(
+						tokens.accessToken,
+						config.tenantId,
+						idsNeedingFullRecord,
+						{ eventsConfig: ctx.eventsConfig, onRetry: retryHandler },
+					)
+				: new Map<string, BankTransactionRecord>()
+
 		const state = await loadState()
+		const stateBatcher = new StateBatcher(state)
 		const results: ReconcileResult[] = []
-		let currentState = state
 		let processedCount = 0
 		const totalCount = inputs.length
 
@@ -721,7 +820,7 @@ export async function runReconcile(
 		}
 
 		for (const input of inputs) {
-			if (isProcessed(currentState, input.BankTransactionID)) {
+			if (stateBatcher.isProcessed(input.BankTransactionID)) {
 				const result: ReconcileResult = {
 					BankTransactionID: input.BankTransactionID,
 					status: 'skipped',
@@ -753,12 +852,12 @@ export async function runReconcile(
 
 			try {
 				if (input.AccountCode) {
-					const pre = await fetchBankTransaction(
-						tokens.accessToken,
-						config.tenantId,
-						input.BankTransactionID,
-						{ eventsConfig: ctx.eventsConfig, onRetry: retryHandler },
-					)
+					const pre = bankTxnById.get(input.BankTransactionID)
+					if (!pre) {
+						throw new Error(
+							`BankTransaction not found in prefetch: ${input.BankTransactionID}`,
+						)
+					}
 					const existing = pre.LineItems ?? []
 					const hasSplit =
 						existing.length > 1 &&
@@ -798,10 +897,9 @@ export async function runReconcile(
 						AccountCode: input.AccountCode,
 					}
 					results.push(result)
-					currentState = markProcessed(currentState, input.BankTransactionID)
-					await saveState(currentState)
-					if (auditPath) {
-						await writeAuditLine(auditPath, {
+					await stateBatcher.markProcessed(input.BankTransactionID)
+					if (auditWriter) {
+						await auditWriter.write({
 							type: 'account-code',
 							BankTransactionID: input.BankTransactionID,
 							AccountCode: input.AccountCode,
@@ -832,12 +930,12 @@ export async function runReconcile(
 							`Invoice amount due less than input: ${input.InvoiceID}`,
 						)
 					}
-					const bankTxn = await fetchBankTransaction(
-						tokens.accessToken,
-						config.tenantId,
-						input.BankTransactionID,
-						{ eventsConfig: ctx.eventsConfig, onRetry: retryHandler },
-					)
+					const bankTxn = bankTxnById.get(input.BankTransactionID)
+					if (!bankTxn) {
+						throw new Error(
+							`BankTransaction not found in prefetch: ${input.BankTransactionID}`,
+						)
+					}
 					const bankAccountId = bankTxn.BankAccount?.AccountID
 					if (!bankAccountId) {
 						throw new Error('Missing BankAccount.AccountID for payment')
@@ -866,10 +964,9 @@ export async function runReconcile(
 						PaymentID: payment.PaymentID,
 					}
 					results.push(result)
-					currentState = markProcessed(currentState, input.BankTransactionID)
-					await saveState(currentState)
-					if (auditPath) {
-						await writeAuditLine(auditPath, {
+					await stateBatcher.markProcessed(input.BankTransactionID)
+					if (auditWriter) {
+						await auditWriter.write({
 							type: 'invoice-payment',
 							BankTransactionID: input.BankTransactionID,
 							InvoiceID: input.InvoiceID,
@@ -891,8 +988,8 @@ export async function runReconcile(
 						error: err.message,
 					}
 					results.push(result)
-					if (auditPath) {
-						await writeAuditLine(auditPath, {
+					if (auditWriter) {
+						await auditWriter.write({
 							type: 'skipped',
 							BankTransactionID: input.BankTransactionID,
 							error: err.message,
@@ -911,8 +1008,8 @@ export async function runReconcile(
 						error: message,
 					}
 					results.push(result)
-					if (auditPath) {
-						await writeAuditLine(auditPath, {
+					if (auditWriter) {
+						await auditWriter.write({
 							type: 'failure',
 							BankTransactionID: input.BankTransactionID,
 							error: message,
@@ -924,6 +1021,12 @@ export async function runReconcile(
 				}
 			}
 			if (interrupted) break
+		}
+
+		// Flush any remaining buffered state and audit entries to disk
+		await stateBatcher.flush()
+		if (auditWriter) {
+			await auditWriter.close()
 		}
 
 		progress.finish()
@@ -992,21 +1095,7 @@ export async function runReconcile(
 		if (interrupted) return EXIT_INTERRUPTED
 		return EXIT_OK
 	} catch (err) {
-		if (err instanceof XeroAuthError) {
-			writeError(ctx, err.message, err.code, err.name, err.context)
-			return EXIT_UNAUTHORIZED
-		}
-		if (err instanceof XeroConflictError || err instanceof XeroApiError) {
-			writeError(ctx, err.message, err.code, err.name, err.context)
-			return EXIT_RUNTIME
-		}
-		writeError(
-			ctx,
-			err instanceof Error ? err.message : String(err),
-			'E_RUNTIME',
-			'RuntimeError',
-		)
-		return EXIT_RUNTIME
+		return handleCommandError(ctx, err)
 	} finally {
 		process.off('SIGINT', handleSigint)
 		if (lockAcquired) {

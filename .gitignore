@@ -64,6 +64,5 @@ website/node_modules/
 # Xero
 .xero-config.json
 .xero-reconcile-state.json
-.xero-reconcile-lock.json
-.xero-reconcile-runs/
 .xero-session/
+.xero-token-refresh.lock

@@ -3,92 +3,19 @@ import path from 'node:path'
 import { emitEvent } from '../../events'
 import { authenticate } from '../../xero/auth'
 import { loadXeroConfig } from '../../xero/config'
+import type { ExitCode, OutputContext } from '../output'
 import {
-	XeroApiError,
-	XeroAuthError,
-	XeroConflictError,
-} from '../../xero/errors'
-
-const EXIT_OK = 0
-const EXIT_RUNTIME = 1
-const EXIT_USAGE = 2
-const EXIT_UNAUTHORIZED = 4
-
-type ExitCode = 0 | 1 | 2 | 3 | 4 | 5 | 130
+	EXIT_OK,
+	EXIT_USAGE,
+	handleCommandError,
+	writeError,
+	writeSuccess,
+} from '../output'
 
 interface AuthSuccessData {
 	readonly command: 'auth'
 	readonly tenantId: string | null
 	readonly orgName: string
-}
-
-interface OutputContext {
-	readonly json: boolean
-	readonly quiet: boolean
-	readonly logLevel: 'silent' | 'info' | 'debug'
-	readonly progressMode: 'animated' | 'static' | 'off'
-	readonly eventsConfig: ReturnType<
-		typeof import('../../events').resolveEventsConfig
-	>
-}
-
-const ERROR_CODE_ACTIONS: Record<
-	string,
-	{ action: string; retryable: boolean }
-> = {
-	E_RUNTIME: { action: 'ESCALATE', retryable: false },
-	E_USAGE: { action: 'FIX_ARGS', retryable: false },
-	E_UNAUTHORIZED: { action: 'RUN_AUTH', retryable: false },
-	E_CONFLICT: { action: 'WAIT_AND_RETRY', retryable: true },
-}
-
-function writeSuccess<T>(
-	ctx: OutputContext,
-	data: T,
-	humanLines: string[],
-	quietLine: string,
-): void {
-	if (ctx.json) {
-		process.stdout.write(
-			`${JSON.stringify({ status: 'data', schemaVersion: 1, data })}\n`,
-		)
-		return
-	}
-	if (ctx.quiet) {
-		process.stdout.write(`${quietLine}\n`)
-		return
-	}
-	process.stdout.write(`${humanLines.join('\n')}\n`)
-}
-
-function writeError(
-	ctx: OutputContext,
-	message: string,
-	errorCode: string,
-	errorName: string,
-	context?: Record<string, unknown>,
-): void {
-	if (ctx.json) {
-		const fallback = { action: 'ESCALATE', retryable: false }
-		const action = ERROR_CODE_ACTIONS[errorCode] ?? fallback
-		const errorPayload: Record<string, unknown> = {
-			name: errorName,
-			code: errorCode,
-			action: action.action,
-			retryable: action.retryable,
-		}
-		if (context) errorPayload.context = context
-		process.stderr.write(
-			`${JSON.stringify({
-				status: 'error',
-				message,
-				error: errorPayload,
-			})}\n`,
-		)
-		return
-	}
-	const line = ctx.quiet ? message : `[xero-cli] ${message}`
-	process.stderr.write(`${line}\n`)
 }
 
 function printSetupGuide(): void {
@@ -174,10 +101,7 @@ export async function runAuth(
 				tenantId: config?.tenantId ?? null,
 				orgName,
 			} satisfies AuthSuccessData,
-			[
-				`✓ Authenticated as "${orgName}"`,
-				'Tenant ID saved to .xero-config.json',
-			],
+			[`Authenticated as "${orgName}"`, 'Tenant ID saved to .xero-config.json'],
 			'Authenticated',
 		)
 		emitEvent(ctx.eventsConfig, 'xero-auth-completed', {
@@ -186,36 +110,20 @@ export async function runAuth(
 		})
 		return EXIT_OK
 	} catch (err) {
-		if (err instanceof XeroAuthError) {
-			writeError(ctx, err.message, err.code, err.name, err.context)
-			emitEvent(ctx.eventsConfig, 'xero-auth-failed', {
-				message: err.message,
-				code: err.code,
-			})
-			return EXIT_UNAUTHORIZED
+		const errorForEvent =
+			err instanceof Error ? { message: err.message, code: 'E_RUNTIME' } : null
+		if (
+			err &&
+			typeof err === 'object' &&
+			'code' in err &&
+			typeof err.code === 'string' &&
+			errorForEvent
+		) {
+			errorForEvent.code = err.code
 		}
-		if (err instanceof XeroConflictError) {
-			writeError(ctx, err.message, err.code, err.name, err.context)
-			emitEvent(ctx.eventsConfig, 'xero-auth-failed', {
-				message: err.message,
-				code: err.code,
-			})
-			return EXIT_RUNTIME
+		if (errorForEvent) {
+			emitEvent(ctx.eventsConfig, 'xero-auth-failed', errorForEvent)
 		}
-		if (err instanceof XeroApiError) {
-			writeError(ctx, err.message, err.code, err.name, err.context)
-			emitEvent(ctx.eventsConfig, 'xero-auth-failed', {
-				message: err.message,
-				code: err.code,
-			})
-			return EXIT_RUNTIME
-		}
-		writeError(
-			ctx,
-			err instanceof Error ? err.message : String(err),
-			'E_RUNTIME',
-			'RuntimeError',
-		)
-		return EXIT_RUNTIME
+		return handleCommandError(ctx, err)
 	}
 }

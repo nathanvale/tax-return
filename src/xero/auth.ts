@@ -1,7 +1,7 @@
 import { timingSafeEqual } from 'node:crypto'
 import { readFile, unlink, writeFile } from 'node:fs/promises'
 import { z } from 'zod'
-import { loadEnvConfig, loadXeroConfig, saveXeroConfig } from './config'
+import { loadEnvConfig, saveXeroConfig } from './config'
 import { XeroApiError, XeroAuthError, XeroConflictError } from './errors'
 
 const KEYCHAIN_SERVICE = 'xero-cli'
@@ -82,6 +82,12 @@ function buildAuthUrl(
 		state,
 	})
 	return `https://login.xero.com/identity/connect/authorize?${params}`
+}
+
+/** Detect whether we are running in a headless/non-interactive environment. */
+function isHeadless(): boolean {
+	if (process.env.XERO_HEADLESS === '1') return true
+	return !process.stdout.isTTY
 }
 
 function openBrowser(url: string): void {
@@ -530,7 +536,12 @@ export async function authenticate(
 	const state = base64UrlEncode(crypto.getRandomValues(new Uint8Array(16)))
 	const authUrl = buildAuthUrl(challenge, state, scope)
 
-	openBrowser(authUrl)
+	if (isHeadless()) {
+		const payload = JSON.stringify({ authUrl })
+		process.stdout.write(`${payload}\n`)
+	} else {
+		openBrowser(authUrl)
+	}
 	const code = await waitForAuthCode(state, options)
 	const tokens = await exchangeToken(code, verifier)
 	const existing = await authProvider.loadTokens()
@@ -538,12 +549,6 @@ export async function authenticate(
 	await authProvider.saveTokens(tokens)
 
 	const connections = await fetchConnections(tokens.accessToken)
-	if (connections.length === 0) {
-		throw new XeroAuthError('No Xero tenants available', {
-			code: 'E_NOT_FOUND',
-			recoverable: false,
-		})
-	}
 	const primary = connections[0]
 	if (!primary) {
 		throw new XeroAuthError('No Xero tenants available', {
@@ -601,32 +606,10 @@ export async function loadTokensRaw(): Promise<StoredTokens | null> {
 	return await authProvider.loadTokens()
 }
 
-/** Delete stored tokens after revoking. */
-export async function deleteTokens(): Promise<void> {
-	const tokens = await loadTokensRaw()
-	await revokeStoredTokens(tokens)
-	await authProvider.deleteTokens()
-}
-
 /** Best-effort check for expired tokens. */
 export function isTokenExpired(
 	expiresAt: number,
 	skewMs = 5 * 60 * 1000,
 ): boolean {
 	return Date.now() + skewMs >= expiresAt
-}
-
-/** Load current tenant configuration (after auth). */
-export async function loadTenantConfig(): Promise<{ tenantId: string }> {
-	const config = await loadXeroConfig()
-	if (!config) {
-		throw new XeroAuthError(
-			'Missing tenant config. Run: bun run xero-cli auth',
-			{
-				code: 'E_NOT_FOUND',
-				recoverable: false,
-			},
-		)
-	}
-	return { tenantId: config.tenantId }
 }

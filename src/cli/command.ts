@@ -8,54 +8,36 @@ import { runInvoices } from './commands/invoices'
 import { runReconcile } from './commands/reconcile'
 import { runStatus } from './commands/status'
 import { runTransactions } from './commands/transactions'
-
-const EXIT_OK = 0
-const EXIT_RUNTIME = 1
-const EXIT_USAGE = 2
-const _EXIT_NOT_FOUND = 3
-const _EXIT_UNAUTHORIZED = 4
-const _EXIT_CONFLICT = 5
-const EXIT_INTERRUPTED = 130
-
-type ExitCode = 0 | 1 | 2 | 3 | 4 | 5 | 130
-
-const SCHEMA_VERSION_OUTPUT = 1
+import type { ExitCode, OutputContext } from './output'
+import {
+	EXIT_INTERRUPTED,
+	EXIT_OK,
+	EXIT_RUNTIME,
+	EXIT_USAGE,
+	sanitizeErrorMessage,
+	writeError,
+	writeSuccess,
+} from './output'
 
 type LogLevel = 'silent' | 'info' | 'debug'
 type ProgressMode = 'animated' | 'static' | 'off'
 
-interface OutputContext {
-	readonly json: boolean
-	readonly quiet: boolean
-	readonly logLevel: LogLevel
-	readonly progressMode: ProgressMode
-	readonly eventsConfig: ReturnType<typeof resolveEventsConfig>
-}
-
-interface GlobalFlags {
-	readonly json: boolean
-	readonly quiet: boolean
-	readonly logLevel: LogLevel
-	readonly progressMode: ProgressMode
-	readonly eventsConfig: ReturnType<typeof resolveEventsConfig>
-}
-
-interface AuthCommand extends GlobalFlags {
+interface AuthCommand extends OutputContext {
 	readonly command: 'auth'
 	readonly authTimeoutMs: number | null
 }
 
-interface StatusCommand extends GlobalFlags {
+interface StatusCommand extends OutputContext {
 	readonly command: 'status'
 }
 
-interface AccountsCommand extends GlobalFlags {
+interface AccountsCommand extends OutputContext {
 	readonly command: 'accounts'
 	readonly type: string | null
 	readonly fields: readonly string[] | null
 }
 
-interface TransactionsCommand extends GlobalFlags {
+interface TransactionsCommand extends OutputContext {
 	readonly command: 'transactions'
 	readonly unreconciled: boolean
 	readonly since: string | null
@@ -68,7 +50,7 @@ interface TransactionsCommand extends GlobalFlags {
 	readonly fields: readonly string[] | null
 }
 
-interface HistoryCommand extends GlobalFlags {
+interface HistoryCommand extends OutputContext {
 	readonly command: 'history'
 	readonly since: string | null
 	readonly contact: string | null
@@ -76,19 +58,19 @@ interface HistoryCommand extends GlobalFlags {
 	readonly fields: readonly string[] | null
 }
 
-interface InvoicesCommand extends GlobalFlags {
+interface InvoicesCommand extends OutputContext {
 	readonly command: 'invoices'
 	readonly status: string | null
 	readonly type: string | null
 	readonly fields: readonly string[] | null
 }
 
-interface HelpCommand extends GlobalFlags {
+interface HelpCommand extends OutputContext {
 	readonly command: 'help'
 	readonly topic: string | null
 }
 
-interface ReconcileCommand extends GlobalFlags {
+interface ReconcileCommand extends OutputContext {
 	readonly command: 'reconcile'
 	readonly execute: boolean
 	readonly fromCsv: string | null
@@ -124,7 +106,7 @@ type ParseCliResult = ParseCliError | ParseCliOk
 
 /** Parse argv into structured command options.
  *  Returns a discriminated union instead of throwing to preserve output mode. */
-function parseCli(argv: readonly string[]): ParseCliResult {
+export function parseCli(argv: readonly string[]): ParseCliResult {
 	const args = argv.slice(2)
 	const preFlags = new Set(args)
 	let commandToken: string | null = null
@@ -509,13 +491,6 @@ function parseCli(argv: readonly string[]): ParseCliResult {
 			},
 		}
 	}
-	if (fieldsRaw) {
-		return parseUsageError(
-			'--fields is only valid for list commands (accounts, transactions, history, invoices)',
-			json,
-			quiet,
-		)
-	}
 	if (commandToken === 'history') {
 		const { fields, error } = parseFields(fieldsRaw, json, quiet)
 		if (error) return error
@@ -552,6 +527,13 @@ function parseCli(argv: readonly string[]): ParseCliResult {
 			},
 		}
 	}
+	if (fieldsRaw) {
+		return parseUsageError(
+			'--fields is only valid for list commands (accounts, transactions, history, invoices)',
+			json,
+			quiet,
+		)
+	}
 	if (commandToken === 'reconcile') {
 		return {
 			ok: true,
@@ -577,84 +559,6 @@ function parseCli(argv: readonly string[]): ParseCliResult {
 	}
 
 	return parseUsageError(`Unknown command: ${commandToken}`, json, quiet)
-}
-
-/** Map error codes to action hints for agents. */
-const ERROR_CODE_ACTIONS: Record<
-	string,
-	{ action: string; retryable: boolean }
-> = {
-	E_OK: { action: 'NONE', retryable: false },
-	E_NETWORK: { action: 'CHECK_NETWORK', retryable: false },
-	E_FORBIDDEN: { action: 'CHECK_SCOPES', retryable: false },
-	E_SERVER_ERROR: { action: 'RETRY_WITH_BACKOFF', retryable: true },
-	E_RATE_LIMITED: { action: 'WAIT_AND_RETRY', retryable: true },
-	E_API_ERROR: { action: 'RETRY_WITH_BACKOFF', retryable: true },
-	E_RUNTIME: { action: 'ESCALATE', retryable: false },
-	E_USAGE: { action: 'FIX_ARGS', retryable: false },
-	E_NOT_FOUND: { action: 'ESCALATE', retryable: false },
-	E_UNAUTHORIZED: { action: 'RUN_AUTH', retryable: false },
-	E_LOCK_CONTENTION: { action: 'WAIT_AND_RETRY', retryable: true },
-	E_STALE_DATA: { action: 'REFETCH_AND_RETRY', retryable: true },
-	E_API_CONFLICT: { action: 'INSPECT_AND_RESOLVE', retryable: false },
-	E_CONFLICT: { action: 'WAIT_AND_RETRY', retryable: true },
-	E_INTERRUPTED: { action: 'NONE', retryable: false },
-}
-
-/** Write successful output in JSON or human mode. */
-function writeSuccess<T>(
-	ctx: OutputContext,
-	data: T,
-	humanLines: string[],
-	quietLine: string,
-): void {
-	if (ctx.json) {
-		process.stdout.write(
-			`${JSON.stringify({
-				status: 'data',
-				schemaVersion: SCHEMA_VERSION_OUTPUT,
-				data,
-			})}\n`,
-		)
-		return
-	}
-	if (ctx.quiet) {
-		process.stdout.write(`${quietLine}\n`)
-		return
-	}
-	process.stdout.write(`${humanLines.join('\n')}\n`)
-}
-
-/** Write structured errors to stderr (JSON in machine mode). */
-function writeError(
-	ctx: OutputContext,
-	message: string,
-	errorCode: string,
-	_exitCode: ExitCode,
-	errorName: string,
-	context?: Record<string, unknown>,
-): void {
-	if (ctx.json) {
-		const fallback = { action: 'ESCALATE', retryable: false }
-		const action = ERROR_CODE_ACTIONS[errorCode] ?? fallback
-		const errorPayload: Record<string, unknown> = {
-			name: errorName,
-			code: errorCode,
-			action: action.action,
-			retryable: action.retryable,
-		}
-		if (context) errorPayload.context = context
-		process.stderr.write(
-			`${JSON.stringify({
-				status: 'error',
-				message,
-				error: errorPayload,
-			})}\n`,
-		)
-		return
-	}
-	const line = ctx.quiet ? message : `[xero-cli] ${message}`
-	process.stderr.write(`${line}\n`)
 }
 
 function parseUsageError(
@@ -742,17 +646,6 @@ function resolveOutputMode(flags: {
 	}
 }
 
-function sanitizeErrorMessage(message: string): string {
-	return message
-		.replace(/Bearer\s+[A-Za-z0-9._-]+/gi, 'Bearer [REDACTED]')
-		.replace(/access_token=[^&\s]+/gi, 'access_token=[REDACTED]')
-		.replace(/refresh_token=[^&\s]+/gi, 'refresh_token=[REDACTED]')
-		.replace(/code=[^&\s]+/gi, 'code=[REDACTED]')
-		.replace(/code_verifier=[^&\s]+/gi, 'code_verifier=[REDACTED]')
-		.replace(/client_id=[^&\s]+/gi, 'client_id=[REDACTED]')
-		.replace(/xero-tenant-id:\s*[^\s,}]+/gi, 'xero-tenant-id: [REDACTED]')
-}
-
 function usageText(): string {
 	return [
 		'xero-cli',
@@ -792,7 +685,6 @@ function usageText(): string {
 }
 
 /** Run the CLI and return an exit code for process exit. */
-/** Run the CLI and return an exit code for process exit. */
 export async function runCli(argv: readonly string[]): Promise<ExitCode> {
 	const parsed = parseCli(argv)
 	if (!parsed.ok) {
@@ -807,7 +699,6 @@ export async function runCli(argv: readonly string[]): Promise<ExitCode> {
 			ctx,
 			parsed.message,
 			parsed.errorCode,
-			parsed.exitCode,
 			'UsageError',
 			parsed.context,
 		)
@@ -873,7 +764,7 @@ export async function runCli(argv: readonly string[]): Promise<ExitCode> {
 			}
 			const rawMessage = err instanceof Error ? err.message : String(err)
 			const message = sanitizeErrorMessage(rawMessage)
-			writeError(ctx, message, 'E_RUNTIME', EXIT_RUNTIME, 'RuntimeError')
+			writeError(ctx, message, 'E_RUNTIME', 'RuntimeError')
 			return EXIT_RUNTIME
 		} finally {
 			await shutdownLogging()
