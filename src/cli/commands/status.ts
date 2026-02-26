@@ -1,6 +1,7 @@
 import { existsSync, lstatSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import path from 'node:path'
+import { getXeroLogger } from '../../logging'
 import { xeroFetch } from '../../xero/api'
 import { isTokenExpired, loadTokens, type StoredTokens } from '../../xero/auth'
 import {
@@ -45,8 +46,12 @@ interface StatusData {
 		| 'CHECK_FS'
 }
 
+/** Logger for the status command handler. */
+const statusLogger = getXeroLogger(['cli', 'status'])
+
 /** Check auth + API connectivity. */
 export async function runStatus(ctx: OutputContext): Promise<ExitCode> {
+	statusLogger.debug('Running status checks')
 	const checks: StatusCheck[] = []
 	let envOk = true
 	let configOk = true
@@ -261,6 +266,11 @@ export async function runStatus(ctx: OutputContext): Promise<ExitCode> {
 		diagnosis = 'fs-error'
 		nextAction = 'CHECK_FS'
 	}
+
+	statusLogger.debug(
+		'Status checks complete: diagnosis={diagnosis} nextAction={nextAction}',
+		{ diagnosis, nextAction },
+	)
 
 	writeSuccess(
 		ctx,

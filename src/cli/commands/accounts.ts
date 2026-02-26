@@ -1,3 +1,4 @@
+import { getXeroLogger } from '../../logging'
 import { xeroFetch } from '../../xero/api'
 import { loadValidTokens } from '../../xero/auth'
 import { loadEnvConfig, loadXeroConfig } from '../../xero/config'
@@ -32,6 +33,9 @@ interface AccountsResponse {
 	readonly Accounts: AccountRecord[]
 }
 
+/** Logger for the accounts command handler. */
+const acctLogger = getXeroLogger(['cli', 'accounts'])
+
 /** List chart of accounts with optional type filter. */
 export async function runAccounts(
 	ctx: OutputContext,
@@ -51,6 +55,9 @@ export async function runAccounts(
 			return EXIT_UNAUTHORIZED
 		}
 
+		acctLogger.debug('Fetching accounts: type={type}', {
+			type: options.type,
+		})
 		const params = new URLSearchParams()
 		if (options.type) {
 			params.set('where', `Type=="${escapeODataValue(options.type)}"`)
@@ -69,6 +76,7 @@ export async function runAccounts(
 			},
 		)
 		const accounts = response.Accounts ?? []
+		acctLogger.debug('Fetched {count} accounts', { count: accounts.length })
 		const projected = projectFields(
 			accounts as Record<string, unknown>[],
 			options.fields,

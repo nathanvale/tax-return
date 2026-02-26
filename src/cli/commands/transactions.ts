@@ -1,3 +1,4 @@
+import { getXeroLogger } from '../../logging'
 import { xeroFetch } from '../../xero/api'
 import { loadValidTokens } from '../../xero/auth'
 import { loadEnvConfig, loadXeroConfig } from '../../xero/config'
@@ -121,6 +122,9 @@ function summarizeTransactions(
 	]
 }
 
+/** Logger for the transactions command handler. */
+const txLogger = getXeroLogger(['cli', 'transactions'])
+
 /** List bank transactions with filters and summary options. */
 export async function runTransactions(
 	ctx: OutputContext,
@@ -157,6 +161,16 @@ export async function runTransactions(
 			since = range.since
 			until = range.until
 		}
+		txLogger.debug(
+			'Fetching transactions: since={since} until={until} unreconciled={unreconciled} page={page} limit={limit}',
+			{
+				since,
+				until,
+				unreconciled: options.unreconciled,
+				page: options.page,
+				limit: options.limit,
+			},
+		)
 		const params = new URLSearchParams()
 		const whereClauses: string[] = []
 
@@ -195,6 +209,9 @@ export async function runTransactions(
 			},
 		)
 		const transactions = response.BankTransactions ?? []
+		txLogger.debug('Fetched {count} transactions', {
+			count: transactions.length,
+		})
 		const limited = options.limit
 			? transactions.slice(0, options.limit)
 			: transactions

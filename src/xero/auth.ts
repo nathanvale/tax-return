@@ -89,7 +89,7 @@ function buildAuthUrl(
 }
 
 /** Detect whether we are running in a headless/non-interactive environment. */
-function isHeadless(): boolean {
+export function isHeadless(): boolean {
 	if (process.env.XERO_HEADLESS === '1') return true
 	return !process.stdout.isTTY
 }

@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs'
 import path from 'node:path'
 import { emitEvent } from '../../events'
 import { getXeroLogger } from '../../logging'
-import { authenticate } from '../../xero/auth'
+import { authenticate, isHeadless } from '../../xero/auth'
 import { loadXeroConfig } from '../../xero/config'
 import type { ExitCode, OutputContext } from '../output'
 import {
@@ -66,6 +66,9 @@ export async function runAuth(
 		const scope =
 			'accounting.banktransactions accounting.payments accounting.invoices accounting.contacts accounting.settings.read offline_access'
 
+		authCmdLogger.info('Starting OAuth2 PKCE flow with scope={scope}', {
+			scope,
+		})
 		emitEvent(ctx.eventsConfig, 'xero-auth-started', { scope })
 
 		if (!ctx.json) {
@@ -98,6 +101,7 @@ export async function runAuth(
 
 		const config = await loadXeroConfig()
 		const orgName = config?.orgName ?? 'Unknown org'
+		authCmdLogger.info('Auth completed for org={orgName}', { orgName })
 
 		writeSuccess(
 			ctx,
@@ -108,6 +112,8 @@ export async function runAuth(
 			} satisfies AuthSuccessData,
 			[`Authenticated as "${orgName}"`, 'Tenant ID saved to .xero-config.json'],
 			'Authenticated',
+			undefined,
+			isHeadless() ? 'result' : undefined,
 		)
 		emitEvent(ctx.eventsConfig, 'xero-auth-completed', {
 			tenantId: config?.tenantId ?? null,

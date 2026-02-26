@@ -12,9 +12,9 @@ import { loadValidTokens } from '../../xero/auth'
 import { loadEnvConfig, loadXeroConfig } from '../../xero/config'
 import { XeroConflictError } from '../../xero/errors'
 import type {
-	tBankTransactionRecord,
-	tBankTransactionsResponse,
-	tLineItemRecord,
+	BankTransactionRecord,
+	BankTransactionsResponse,
+	LineItemRecord,
 } from '../../xero/types'
 import type { ExitCode, OutputContext } from '../output'
 import {
@@ -505,28 +505,6 @@ async function fetchAccounts(
 	)
 }
 
-async function fetchBankTransaction(
-	accessToken: string,
-	tenantId: string,
-	id: string,
-	options: {
-		readonly eventsConfig: OutputContext['eventsConfig']
-		readonly onRetry?: (info: RetryInfo) => void
-	},
-): Promise<BankTransactionRecord> {
-	const response = await xeroFetch<BankTransactionsResponse>(
-		`/BankTransactions/${id}`,
-		{ method: 'GET' },
-		{
-			accessToken,
-			tenantId,
-			eventsConfig: options.eventsConfig,
-			onRetry: options.onRetry,
-		},
-	)
-	return assertValidBankTransactionResponse(response)
-}
-
 /**
  * Batch-fetch full BankTransaction records by IDs to avoid N+1 API calls.
  *
@@ -1001,6 +979,14 @@ export async function runReconcile(
 					if (!payment?.PaymentID) {
 						throw new Error('Payment creation failed')
 					}
+					reconcileLogger.debug(
+						'Successfully reconciled {txnId} via InvoiceID={invoiceId}, PaymentID={paymentId}',
+						{
+							txnId: input.BankTransactionID,
+							invoiceId: input.InvoiceID,
+							paymentId: payment.PaymentID,
+						},
+					)
 					const result: ReconcileResult = {
 						BankTransactionID: input.BankTransactionID,
 						status: 'reconciled',
@@ -1024,6 +1010,10 @@ export async function runReconcile(
 				}
 			} catch (err) {
 				if (err instanceof XeroConflictError && err.code === 'E_CONFLICT') {
+					reconcileLogger.debug('Conflict skip for {txnId}: {error}', {
+						txnId: input.BankTransactionID,
+						error: err.message,
+					})
 					const result: ReconcileResult = {
 						BankTransactionID: input.BankTransactionID,
 						status: 'skipped',
@@ -1044,6 +1034,10 @@ export async function runReconcile(
 					progress.update(processedCount, totalCount)
 				} else {
 					const message = err instanceof Error ? err.message : String(err)
+					reconcileLogger.debug('Failed {txnId}: {error}', {
+						txnId: input.BankTransactionID,
+						error: message,
+					})
 					const result: ReconcileResult = {
 						BankTransactionID: input.BankTransactionID,
 						status: 'failed',
@@ -1069,8 +1063,12 @@ export async function runReconcile(
 
 		// Flush any remaining buffered state and audit entries to disk
 		await stateBatcher.flush()
+		reconcileLogger.debug('State checkpoint flushed with {itemCount} items', {
+			itemCount: results.length,
+		})
 		if (auditWriter) {
 			await auditWriter.close()
+			reconcileLogger.debug('Audit file closed')
 		}
 
 		progress.finish()
@@ -1088,6 +1086,16 @@ export async function runReconcile(
 			else if (r.status === 'skipped') summary.skipped += 1
 			else if (r.status === 'dry-run') summary.dryRun += 1
 		}
+		reconcileLogger.info(
+			'Batch summary: {succeeded} succeeded, {failed} failed, {skipped} skipped, {dryRun} dry-run (total {total})',
+			{
+				succeeded: summary.succeeded,
+				failed: summary.failed,
+				skipped: summary.skipped,
+				dryRun: summary.dryRun,
+				total: summary.total,
+			},
+		)
 
 		const byAccount = new Map<string, { count: number; total: number }>()
 		const byType = new Map<string, { count: number; total: number }>()
@@ -1141,6 +1149,12 @@ export async function runReconcile(
 			executed: options.execute,
 			summary,
 			interrupted,
+		})
+		reconcileLogger.info('Reconcile run completed in {mode} mode', {
+			mode: options.execute ? 'execute' : 'dry-run',
+			interrupted,
+			succeeded: summary.succeeded,
+			failed: summary.failed,
 		})
 		if (interrupted) return EXIT_INTERRUPTED
 		return EXIT_OK
