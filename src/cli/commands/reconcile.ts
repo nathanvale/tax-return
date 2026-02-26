@@ -876,6 +876,10 @@ export async function runReconcile(
 				reconcileLogger.debug('Skipping {txnId} - already processed in state', {
 					txnId: input.BankTransactionID,
 				})
+				emitEvent(ctx.eventsConfig, 'xero-reconcile-item-skipped', {
+					bankTransactionId: input.BankTransactionID,
+					reason: 'already-processed',
+				})
 				const result: ReconcileResult = {
 					BankTransactionID: input.BankTransactionID,
 					status: 'skipped',
@@ -1086,6 +1090,9 @@ export async function runReconcile(
 						txnId: input.BankTransactionID,
 						error: err.message,
 					})
+					emitEvent(ctx.eventsConfig, 'xero-reconcile-item-conflict', {
+						bankTransactionId: input.BankTransactionID,
+					})
 					const result: ReconcileResult = {
 						BankTransactionID: input.BankTransactionID,
 						status: 'skipped',
@@ -1109,6 +1116,11 @@ export async function runReconcile(
 					reconcileLogger.debug('Failed {txnId}: {error}', {
 						txnId: input.BankTransactionID,
 						error: message,
+					})
+					emitEvent(ctx.eventsConfig, 'xero-reconcile-item-failed', {
+						bankTransactionId: input.BankTransactionID,
+						error: message,
+						durationMs: Math.round(performance.now() - itemStart),
 					})
 					const result: ReconcileResult = {
 						BankTransactionID: input.BankTransactionID,
