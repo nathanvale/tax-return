@@ -182,21 +182,29 @@ async function readKeychain(): Promise<StoredTokens | null> {
 	})
 }
 
+/**
+ * Write tokens to the macOS Keychain.
+ *
+ * Security: The token payload is passed via an environment variable rather than
+ * a command-line argument. CLI args are visible to all users via `ps aux`, but
+ * env vars are only readable by the process owner (not exposed by `ps` on
+ * macOS). We spawn `sh -c` which reads $__XERO_KCP and forwards it as the
+ * `-w` value to `security add-generic-password`.
+ */
 async function writeKeychain(tokens: StoredTokens): Promise<void> {
 	if (process.env.XERO_TEST_TOKENS && isTestEnvironment()) return
 	authLogger.debug('Writing tokens to Keychain.')
 	const payload = JSON.stringify(tokens)
-	const proc = Bun.spawn([
-		'security',
-		'add-generic-password',
-		'-s',
-		KEYCHAIN_SERVICE,
-		'-a',
-		KEYCHAIN_ACCOUNT,
-		'-w',
-		payload,
-		'-U',
-	])
+	const proc = Bun.spawn(
+		[
+			'sh',
+			'-c',
+			`security add-generic-password -s "${KEYCHAIN_SERVICE}" -a "${KEYCHAIN_ACCOUNT}" -U -w "$__XERO_KCP"`,
+		],
+		{
+			env: { ...process.env, __XERO_KCP: payload },
+		},
+	)
 	const errorOutput = await streamToString(proc.stderr ?? null)
 	const exitCode = await proc.exited
 	if (exitCode !== 0) {

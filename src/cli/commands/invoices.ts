@@ -1,3 +1,4 @@
+import { getXeroLogger } from '../../logging'
 import { xeroFetch } from '../../xero/api'
 import { loadValidTokens } from '../../xero/auth'
 import { loadEnvConfig, loadXeroConfig } from '../../xero/config'
@@ -40,6 +41,9 @@ interface InvoicesSuccessData {
 	readonly invoices: Record<string, unknown>[]
 }
 
+/** Logger for the invoices command handler. */
+const invLogger = getXeroLogger(['cli', 'invoices'])
+
 /** List outstanding invoices. */
 export async function runInvoices(
 	ctx: OutputContext,
@@ -59,6 +63,10 @@ export async function runInvoices(
 			return EXIT_UNAUTHORIZED
 		}
 
+		invLogger.debug('Fetching invoices: status={status} type={type}', {
+			status: options.status,
+			type: options.type,
+		})
 		const whereClauses = []
 		if (options.status) {
 			whereClauses.push(`Status=="${escapeODataValue(options.status)}"`)
@@ -85,6 +93,7 @@ export async function runInvoices(
 			},
 		)
 		const invoices = response.Invoices ?? []
+		invLogger.debug('Fetched {count} invoices', { count: invoices.length })
 		const projected = projectFields(
 			invoices as Record<string, unknown>[],
 			options.fields,

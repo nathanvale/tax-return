@@ -1,3 +1,4 @@
+import { getXeroLogger } from '../../logging'
 import { xeroFetch } from '../../xero/api'
 import { loadValidTokens } from '../../xero/auth'
 import { loadEnvConfig, loadXeroConfig } from '../../xero/config'
