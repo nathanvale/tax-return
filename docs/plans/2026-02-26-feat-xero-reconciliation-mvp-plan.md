@@ -1,9 +1,14 @@
 ---
 title: "feat: Xero bank reconciliation MVP - auth + simple matching"
 type: feat
-status: active
+status: superseded
+superseded_by: 2026-02-26-feat-xero-cli-agent-native-plan.md
 date: 2026-02-26
 ---
+
+> **SUPERSEDED** -- This plan has been replaced by `2026-02-26-feat-xero-cli-agent-native-plan.md`.
+> The architecture shifted from a monolithic CLI with built-in matching to an agent-native CLI (dumb pipe) + Claude Code skill (intelligence).
+> The tech spec and security sections below are still valid and referenced by the new plan.
 
 # Xero Bank Reconciliation MVP - Auth + Simple Matching
 
