@@ -73,6 +73,7 @@ export async function runAccounts(
 			accounts as Record<string, unknown>[],
 			options.fields,
 		)
+		const warnings = detectAllUndefinedFields(projected, options.fields)
 
 		writeSuccess(
 			ctx,
@@ -83,6 +84,7 @@ export async function runAccounts(
 			},
 			[`Found ${accounts.length} accounts`],
 			`${accounts.length}`,
+			warnings,
 		)
 		return EXIT_OK
 	} catch (err) {

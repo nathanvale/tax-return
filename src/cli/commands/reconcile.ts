@@ -4,12 +4,18 @@ import { mkdir, open, readdir, stat, unlink, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { z } from 'zod'
 import { emitEvent } from '../../events'
+import { getXeroLogger } from '../../logging'
 import { acquireLock, releaseLock } from '../../state/lock'
 import { loadState, StateBatcher } from '../../state/state'
 import { xeroFetch } from '../../xero/api'
 import { loadValidTokens } from '../../xero/auth'
 import { loadEnvConfig, loadXeroConfig } from '../../xero/config'
 import { XeroConflictError } from '../../xero/errors'
+import type {
+	tBankTransactionRecord,
+	tBankTransactionsResponse,
+	tLineItemRecord,
+} from '../../xero/types'
 import type { ExitCode, OutputContext } from '../output'
 import {
 	EXIT_INTERRUPTED,
@@ -28,6 +34,9 @@ const AUDIT_DIR_MODE = 0o700
 const UUID_SHAPE =
 	/^[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}$/
 const ACCOUNT_CODE_SHAPE = /^[A-Za-z0-9]{1,10}$/
+
+/** Logger for the reconciliation pipeline. */
+const reconcileLogger = getXeroLogger(['reconcile'])
 
 interface ReconcileCommand {
 	readonly command: 'reconcile'
@@ -112,32 +121,6 @@ interface ReconcileResult {
 	readonly InvoiceID?: string
 	readonly PaymentID?: string
 	readonly error?: string
-}
-
-interface BankTransactionRecord {
-	readonly BankTransactionID: string
-	readonly Type?: string
-	readonly Total?: number
-	readonly DateString?: string
-	readonly LineItems?: LineItemRecord[]
-	readonly BankAccount?: { AccountID?: string }
-	readonly HasValidationErrors?: boolean
-	readonly StatusAttributeString?: string
-	readonly HasErrors?: boolean
-}
-
-interface LineItemRecord {
-	readonly Description?: string
-	readonly Quantity?: number
-	readonly UnitAmount?: number
-	readonly TaxType?: string
-	readonly TaxAmount?: number
-	readonly LineAmount?: number
-	readonly AccountCode?: string
-}
-
-interface BankTransactionsResponse {
-	readonly BankTransactions: BankTransactionRecord[]
 }
 
 interface AccountsResponse {
@@ -692,6 +675,10 @@ export async function runReconcile(
 	}
 	process.once('SIGINT', handleSigint)
 	try {
+		reconcileLogger.info('Reconcile run started in {mode} mode', {
+			mode: options.execute ? 'execute' : 'dry-run',
+			fromCsv: options.fromCsv ?? 'stdin',
+		})
 		loadEnvConfig()
 		if (options.execute) {
 			await acquireLock()
@@ -747,10 +734,18 @@ export async function runReconcile(
 			{ eventsConfig: ctx.eventsConfig, onRetry: retryHandler },
 		)
 		const unreconciledSet = new Set(unreconciledSnapshot.keys())
+		reconcileLogger.info(
+			'Preflight: fetched {transactionCount} unreconciled transactions',
+			{ transactionCount: unreconciledSnapshot.size },
+		)
 		const accountCodes = await fetchAccounts(
 			tokens.accessToken,
 			config.tenantId,
 			{ eventsConfig: ctx.eventsConfig, onRetry: retryHandler },
+		)
+		reconcileLogger.info(
+			'Preflight: loaded {accountCodeCount} active account codes',
+			{ accountCodeCount: accountCodes.size },
 		)
 
 		const invalidIds = inputs
@@ -841,6 +836,9 @@ export async function runReconcile(
 
 		for (const input of inputs) {
 			if (stateBatcher.isProcessed(input.BankTransactionID)) {
+				reconcileLogger.debug('Skipping {txnId} - already processed in state', {
+					txnId: input.BankTransactionID,
+				})
 				const result: ReconcileResult = {
 					BankTransactionID: input.BankTransactionID,
 					status: 'skipped',
@@ -856,6 +854,12 @@ export async function runReconcile(
 			}
 
 			if (!options.execute) {
+				reconcileLogger.debug('Dry-run for {txnId} with {target}', {
+					txnId: input.BankTransactionID,
+					target: input.AccountCode
+						? `AccountCode=${input.AccountCode}`
+						: `InvoiceID=${input.InvoiceID}`,
+				})
 				const result: ReconcileResult = {
 					BankTransactionID: input.BankTransactionID,
 					status: 'dry-run',
@@ -872,6 +876,10 @@ export async function runReconcile(
 
 			try {
 				if (input.AccountCode) {
+					reconcileLogger.debug(
+						'Processing {txnId} with AccountCode={accountCode}',
+						{ txnId: input.BankTransactionID, accountCode: input.AccountCode },
+					)
 					const pre = bankTxnById.get(input.BankTransactionID)
 					if (!pre) {
 						throw new Error(
@@ -902,6 +910,13 @@ export async function runReconcile(
 									AccountCode: input.AccountCode,
 								}))
 
+					reconcileLogger.debug(
+						'Updating BankTransaction {txnId} with {lineItemCount} line items',
+						{
+							txnId: input.BankTransactionID,
+							lineItemCount: lineItems.length,
+						},
+					)
 					await updateBankTransaction(
 						tokens.accessToken,
 						config.tenantId,
@@ -909,6 +924,10 @@ export async function runReconcile(
 						lineItems,
 						pre.Total,
 						{ eventsConfig: ctx.eventsConfig, onRetry: retryHandler },
+					)
+					reconcileLogger.debug(
+						'Successfully reconciled {txnId} via AccountCode',
+						{ txnId: input.BankTransactionID },
 					)
 
 					const result: ReconcileResult = {
@@ -933,6 +952,10 @@ export async function runReconcile(
 				}
 
 				if (input.InvoiceID) {
+					reconcileLogger.debug(
+						'Processing {txnId} with InvoiceID={invoiceId}',
+						{ txnId: input.BankTransactionID, invoiceId: input.InvoiceID },
+					)
 					if (!input.Amount || !input.CurrencyCode) {
 						throw new Error('Invoice payments require Amount and CurrencyCode')
 					}

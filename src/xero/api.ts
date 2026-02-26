@@ -131,6 +131,17 @@ export async function xeroFetch<T>(
 			})
 
 			if (!response.ok) {
+				const durationMs = Math.round(performance.now() - startTime)
+				apiLogger.debug(
+					'Response {status} from {method} {url} in {durationMs}ms',
+					{
+						status: response.status,
+						method: init.method ?? 'GET',
+						url: url.toString(),
+						durationMs,
+						...getLogContext(),
+					},
+				)
 				const payload = await response.text().catch(() => '')
 				const message = payload
 					? `Xero API error (${response.status}): ${payload}`
@@ -141,17 +152,26 @@ export async function xeroFetch<T>(
 					const backoff = retryAfter > 0 ? retryAfter * 1000 : 1000 * attempt
 					const reason = response.status === 429 ? 'rate-limit' : 'server-error'
 					if (response.status === 429) {
-						apiLogger.warn('Rate limited. Retrying after {backoff}ms', {
-							status: response.status,
-							backoff,
-							...getLogContext(),
-						})
+						apiLogger.warn(
+							'Rate limited (429). Retry-After={retryAfter}s, backoff={backoff}ms, attempt={attempt}',
+							{
+								status: response.status,
+								retryAfter,
+								backoff,
+								attempt,
+								...getLogContext(),
+							},
+						)
 					} else {
-						apiLogger.info('Retrying after HTTP {status} in {backoff}ms', {
-							status: response.status,
-							backoff,
-							...getLogContext(),
-						})
+						apiLogger.info(
+							'Retrying after HTTP {status} in {backoff}ms (attempt={attempt})',
+							{
+								status: response.status,
+								backoff,
+								attempt,
+								...getLogContext(),
+							},
+						)
 					}
 					options.onRetry?.({
 						reason,
@@ -171,6 +191,17 @@ export async function xeroFetch<T>(
 			}
 
 			const data = (await response.json()) as T
+			const durationMs = Math.round(performance.now() - startTime)
+			apiLogger.debug(
+				'Response {status} from {method} {url} in {durationMs}ms',
+				{
+					status: response.status,
+					method: init.method ?? 'GET',
+					url: url.toString(),
+					durationMs,
+					...getLogContext(),
+				},
+			)
 			emitEvent(options.eventsConfig ?? { url: null }, 'xero-fetch-completed', {
 				method: init.method ?? 'GET',
 				url: url.toString(),
@@ -191,10 +222,14 @@ export async function xeroFetch<T>(
 			}
 			if (err instanceof Error && err.name === 'AbortError') {
 				if (attempt <= retryLimit + 1) {
-					apiLogger.info('Retrying after timeout in {backoff}ms', {
-						backoff: 1000 * attempt,
-						...getLogContext(),
-					})
+					apiLogger.info(
+						'Retrying after timeout in {backoff}ms (attempt={attempt})',
+						{
+							backoff: 1000 * attempt,
+							attempt,
+							...getLogContext(),
+						},
+					)
 					options.onRetry?.({
 						reason: 'timeout',
 						backoffMs: 1000 * attempt,

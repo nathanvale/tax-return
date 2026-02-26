@@ -1,6 +1,11 @@
 import { randomUUID } from 'node:crypto'
 import { resolveEventsConfig } from '../events'
-import { setupLogging, shutdownLogging, withContext } from '../logging'
+import {
+	getXeroLogger,
+	setupLogging,
+	shutdownLogging,
+	withContext,
+} from '../logging'
 import { runAccounts } from './commands/accounts'
 import { runAuth } from './commands/auth'
 import { runHistory } from './commands/history'
@@ -18,6 +23,9 @@ import {
 	writeError,
 	writeSuccess,
 } from './output'
+
+/** Logger for CLI arg parsing, command dispatch, and output formatting. */
+const cliLogger = getXeroLogger(['cli'])
 
 type LogLevel = 'silent' | 'info' | 'debug'
 type ProgressMode = 'animated' | 'static' | 'off'
@@ -618,6 +626,23 @@ function usageText(): string {
 	].join('\n')
 }
 
+/**
+ * Strip sensitive fields (tokens, secrets) from CLI options before logging.
+ * Returns a plain object safe for structured log properties.
+ */
+function sanitizeCliOptions(options: CliOptions): Record<string, unknown> {
+	const { json, quiet, logLevel, progressMode, eventsConfig, ...rest } =
+		options as unknown as Record<string, unknown>
+	return {
+		command: options.command,
+		json,
+		quiet,
+		logLevel,
+		progressMode,
+		...rest,
+	}
+}
+
 /** Run the CLI and return an exit code for process exit. */
 export async function runCli(argv: readonly string[]): Promise<ExitCode> {
 	const parsed = parseCli(argv)
@@ -652,23 +677,38 @@ export async function runCli(argv: readonly string[]): Promise<ExitCode> {
 	}
 
 	return await withContext({ runId: randomUUID() }, async () => {
+		const startTime = Date.now()
 		try {
 			setupLogging(ctx)
+			cliLogger.info('CLI started: {command}', {
+				command: options.command,
+			})
+			cliLogger.debug('Parsed options: {options}', {
+				options: sanitizeCliOptions(options),
+			})
+			let exitCode: ExitCode
 			switch (options.command) {
 				case 'auth':
-					return await runAuth(ctx, options)
+					exitCode = await runAuth(ctx, options)
+					break
 				case 'status':
-					return await runStatus(ctx)
+					exitCode = await runStatus(ctx)
+					break
 				case 'accounts':
-					return await runAccounts(ctx, options)
+					exitCode = await runAccounts(ctx, options)
+					break
 				case 'transactions':
-					return await runTransactions(ctx, options)
+					exitCode = await runTransactions(ctx, options)
+					break
 				case 'history':
-					return await runHistory(ctx, options)
+					exitCode = await runHistory(ctx, options)
+					break
 				case 'invoices':
-					return await runInvoices(ctx, options)
+					exitCode = await runInvoices(ctx, options)
+					break
 				case 'reconcile':
-					return await runReconcile(ctx, options)
+					exitCode = await runReconcile(ctx, options)
+					break
 				case 'help': {
 					if (options.topic === 'version') {
 						writeSuccess(
@@ -677,7 +717,8 @@ export async function runCli(argv: readonly string[]): Promise<ExitCode> {
 							['xero-cli v0.0.0'],
 							'0.0.0',
 						)
-						return EXIT_OK
+						exitCode = EXIT_OK
+						break
 					}
 					writeSuccess(
 						ctx,
@@ -685,19 +726,43 @@ export async function runCli(argv: readonly string[]): Promise<ExitCode> {
 						[usageText()],
 						'xero-cli help',
 					)
-					return EXIT_OK
+					exitCode = EXIT_OK
+					break
 				}
 				default: {
 					const _exhaustive: never = options
 					return _exhaustive
 				}
 			}
+			const durationMs = Date.now() - startTime
+			cliLogger.info(
+				'CLI completed: {command} exitCode={exitCode} duration={durationMs}ms',
+				{
+					command: options.command,
+					exitCode,
+					durationMs,
+				},
+			)
+			return exitCode
 		} catch (err) {
+			const durationMs = Date.now() - startTime
 			if (err instanceof Error && err.name === 'AbortError') {
+				cliLogger.info('CLI interrupted: {command} duration={durationMs}ms', {
+					command: options.command,
+					durationMs,
+				})
 				return EXIT_INTERRUPTED
 			}
 			const rawMessage = err instanceof Error ? err.message : String(err)
 			const message = sanitizeErrorMessage(rawMessage)
+			cliLogger.error(
+				'CLI failed: {command} error={error} duration={durationMs}ms',
+				{
+					command: options.command,
+					error: message,
+					durationMs,
+				},
+			)
 			writeError(ctx, message, 'E_RUNTIME', 'RuntimeError')
 			return EXIT_RUNTIME
 		} finally {

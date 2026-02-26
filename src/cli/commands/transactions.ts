@@ -7,6 +7,7 @@ import type {
 } from '../../xero/types'
 import type { ExitCode, OutputContext } from '../output'
 import {
+	detectAllUndefinedFields,
 	EXIT_OK,
 	EXIT_UNAUTHORIZED,
 	handleCommandError,
@@ -201,6 +202,7 @@ export async function runTransactions(
 			limited as Record<string, unknown>[],
 			options.fields,
 		)
+		const warnings = detectAllUndefinedFields(projected, options.fields)
 
 		if (!ctx.json && (options.summary || transactions.length > 50)) {
 			const summaryLines = summarizeTransactions(transactions)
@@ -217,6 +219,7 @@ export async function runTransactions(
 					'Use --limit 20 to see first 20 rows, or --json for full data.',
 				],
 				`${transactions.length}`,
+				warnings,
 			)
 			return EXIT_OK
 		}
@@ -230,6 +233,7 @@ export async function runTransactions(
 			},
 			[`Found ${transactions.length} transactions`],
 			`${transactions.length}`,
+			warnings,
 		)
 		return EXIT_OK
 	} catch (err) {

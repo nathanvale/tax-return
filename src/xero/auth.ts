@@ -150,6 +150,7 @@ async function readKeychain(): Promise<StoredTokens | null> {
 			}
 		}
 	}
+	authLogger.debug('Reading tokens from Keychain.')
 	const proc = Bun.spawn([
 		'security',
 		'find-generic-password',
@@ -163,9 +164,18 @@ async function readKeychain(): Promise<StoredTokens | null> {
 	const output = await streamToString(proc.stdout ?? null)
 	const errorOutput = await streamToString(proc.stderr ?? null)
 	const exitCode = await proc.exited
-	if (exitCode === 0) return parseKeychainOutput(output)
+	if (exitCode === 0) {
+		const tokens = parseKeychainOutput(output)
+		authLogger.debug('Keychain read result: token={token}', {
+			token: tokens ? 'present' : 'missing',
+		})
+		return tokens
+	}
 	const info = classifyKeychainError(errorOutput.trim())
-	if (info.code === 'E_NOT_FOUND') return null
+	if (info.code === 'E_NOT_FOUND') {
+		authLogger.debug('Keychain entry not found.')
+		return null
+	}
 	throw new XeroAuthError(info.message, {
 		code: info.code,
 		recoverable: false,
@@ -174,6 +184,7 @@ async function readKeychain(): Promise<StoredTokens | null> {
 
 async function writeKeychain(tokens: StoredTokens): Promise<void> {
 	if (process.env.XERO_TEST_TOKENS && isTestEnvironment()) return
+	authLogger.debug('Writing tokens to Keychain.')
 	const payload = JSON.stringify(tokens)
 	const proc = Bun.spawn([
 		'security',
@@ -199,6 +210,7 @@ async function writeKeychain(tokens: StoredTokens): Promise<void> {
 
 async function deleteKeychain(): Promise<void> {
 	if (process.env.XERO_TEST_TOKENS && isTestEnvironment()) return
+	authLogger.debug('Deleting tokens from Keychain.')
 	const proc = Bun.spawn([
 		'security',
 		'delete-generic-password',
@@ -521,22 +533,25 @@ export async function authenticate(
 	scope: string,
 	options?: AuthWaitOptions,
 ): Promise<{ tenantId: string }> {
+	authLogger.debug('Starting PKCE auth flow with scope={scope}', { scope })
 	const verifier = generateCodeVerifier()
 	const challenge = await generateCodeChallenge(verifier)
 	const state = base64UrlEncode(crypto.getRandomValues(new Uint8Array(16)))
 	const authUrl = buildAuthUrl(challenge, state, scope)
 
 	if (isHeadless()) {
-		const payload = JSON.stringify({ authUrl })
+		const payload = JSON.stringify({ phase: 'auth_url', authUrl })
 		process.stdout.write(`${payload}\n`)
 	} else {
 		openBrowser(authUrl)
 	}
 	const code = await waitForAuthCode(state, options)
+	authLogger.debug('Auth callback received, exchanging code for tokens.')
 	const tokens = await exchangeToken(code, verifier)
 	const existing = await authProvider.loadTokens()
 	await revokeStoredTokens(existing)
 	await authProvider.saveTokens(tokens)
+	authLogger.debug('Tokens saved after initial auth.')
 
 	const connections = await fetchConnections(tokens.accessToken)
 	const primary = connections[0]
@@ -569,7 +584,9 @@ export async function loadTokens(): Promise<StoredTokens> {
 export async function loadValidTokens(): Promise<StoredTokens> {
 	const tokens = await loadTokens()
 	if (!isTokenExpired(tokens.expiresAt)) return tokens
+	authLogger.debug('Token expired, attempting refresh.')
 	return await withRefreshLock(async () => {
+		authLogger.info('Token refresh lock acquired.')
 		const fresh = await authProvider.loadTokens()
 		if (!fresh) {
 			throw new XeroAuthError('Not authenticated. Run: bun run xero-cli auth', {
@@ -577,16 +594,29 @@ export async function loadValidTokens(): Promise<StoredTokens> {
 				recoverable: false,
 			})
 		}
-		if (!isTokenExpired(fresh.expiresAt)) return fresh
-		const refreshed = await refreshToken(fresh)
+		if (!isTokenExpired(fresh.expiresAt)) {
+			authLogger.debug('Token refreshed by another process, skipping.')
+			return fresh
+		}
+		let refreshed: StoredTokens
+		try {
+			refreshed = await refreshToken(fresh)
+		} catch (err) {
+			authLogger.warn('Token refresh failed: {message}', {
+				message: err instanceof Error ? err.message : String(err),
+			})
+			throw err
+		}
 		try {
 			await authProvider.saveTokens(refreshed)
 		} catch (_err) {
+			authLogger.warn('Token refresh succeeded but failed to save tokens.')
 			throw new XeroAuthError(
 				'Token refresh succeeded but could not save new tokens. Re-auth required.',
 				{ code: 'E_UNAUTHORIZED', recoverable: false },
 			)
 		}
+		authLogger.debug('Token refreshed and saved successfully.')
 		return refreshed
 	})
 }

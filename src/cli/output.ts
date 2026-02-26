@@ -60,13 +60,20 @@ export const ERROR_CODE_ACTIONS: Record<
 	E_INTERRUPTED: { action: 'NONE', retryable: false },
 }
 
-/** Write successful output in JSON or human mode. */
+/**
+ * Write successful output in JSON or human mode.
+ *
+ * When `phase` is provided the JSON envelope includes a `phase` discriminator
+ * field, enabling NDJSON two-phase contracts (e.g. headless auth emits an
+ * `auth_url` line followed by a `result` line).
+ */
 export function writeSuccess<T>(
 	ctx: OutputContext,
 	data: T,
 	humanLines: string[],
 	quietLine: string,
 	warnings?: readonly string[],
+	phase?: string,
 ): void {
 	const activeWarnings = warnings && warnings.length > 0 ? warnings : undefined
 	if (ctx.json) {
@@ -75,6 +82,7 @@ export function writeSuccess<T>(
 			schemaVersion: SCHEMA_VERSION_OUTPUT,
 			data,
 		}
+		if (phase) envelope.phase = phase
 		if (activeWarnings) envelope.warnings = activeWarnings
 		process.stdout.write(`${JSON.stringify(envelope)}\n`)
 		return

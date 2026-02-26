@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs'
 import path from 'node:path'
 import { emitEvent } from '../../events'
+import { getXeroLogger } from '../../logging'
 import { authenticate } from '../../xero/auth'
 import { loadXeroConfig } from '../../xero/config'
 import type { ExitCode, OutputContext } from '../output'
@@ -11,6 +12,9 @@ import {
 	writeError,
 	writeSuccess,
 } from '../output'
+
+/** Logger for the auth command handler. */
+const authCmdLogger = getXeroLogger(['cli', 'auth'])
 
 interface AuthSuccessData {
 	readonly command: 'auth'
@@ -50,6 +54,7 @@ export async function runAuth(
 	options: { readonly authTimeoutMs: number | null },
 ): Promise<ExitCode> {
 	const ctx = _ctx
+	authCmdLogger.debug('Checking for .env file')
 	const envPath = path.join(process.cwd(), '.env')
 	if (!existsSync(envPath)) {
 		printSetupGuide()

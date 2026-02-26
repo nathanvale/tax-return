@@ -8,6 +8,7 @@ import type {
 } from '../../xero/types'
 import type { ExitCode, OutputContext } from '../output'
 import {
+	detectAllUndefinedFields,
 	EXIT_OK,
 	EXIT_UNAUTHORIZED,
 	EXIT_USAGE,
@@ -127,7 +128,7 @@ export async function runHistory(
 		const params = new URLSearchParams()
 		params.set('where', whereClauses.join(' && '))
 
-		const response = await xeroFetch<TransactionsResponse>(
+		const response = await xeroFetch<BankTransactionsResponse>(
 			`/BankTransactions?${params.toString()}`,
 			{ method: 'GET' },
 			{
@@ -143,6 +144,10 @@ export async function runHistory(
 					options.fields,
 				)
 			: grouped
+		const warnings = detectAllUndefinedFields(
+			projected as Record<string, unknown>[],
+			options.fields,
+		)
 
 		writeSuccess(
 			ctx,
@@ -153,6 +158,7 @@ export async function runHistory(
 			} satisfies HistorySuccessData,
 			[`Found ${grouped.length} grouped transactions`],
 			`${grouped.length}`,
+			warnings,
 		)
 		return EXIT_OK
 	} catch (err) {

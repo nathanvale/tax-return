@@ -4,6 +4,7 @@ import { loadEnvConfig, loadXeroConfig } from '../../xero/config'
 import { escapeODataValue } from '../../xero/odata'
 import type { ExitCode, OutputContext } from '../output'
 import {
+	detectAllUndefinedFields,
 	EXIT_OK,
 	EXIT_UNAUTHORIZED,
 	handleCommandError,
@@ -88,6 +89,7 @@ export async function runInvoices(
 			invoices as Record<string, unknown>[],
 			options.fields,
 		)
+		const warnings = detectAllUndefinedFields(projected, options.fields)
 
 		writeSuccess(
 			ctx,
@@ -98,6 +100,7 @@ export async function runInvoices(
 			} satisfies InvoicesSuccessData,
 			[`Found ${invoices.length} invoices`],
 			`${invoices.length}`,
+			warnings,
 		)
 		return EXIT_OK
 	} catch (err) {
