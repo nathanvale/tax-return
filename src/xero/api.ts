@@ -90,11 +90,27 @@ export async function xeroFetch<T>(
 		attempt += 1
 		const controller = new AbortController()
 		const timeout = setTimeout(() => controller.abort(), timeoutMs)
+		const startTime = performance.now()
 
 		try {
-			apiLogger.debug('Request {method} {url}', {
-				method: init.method ?? 'GET',
-				url: url.toString(),
+			apiLogger.debug(
+				'Request {method} {url} (timeout={timeoutMs}ms, attempt={attempt})',
+				{
+					method: init.method ?? 'GET',
+					url: url.toString(),
+					timeoutMs,
+					attempt,
+					...getLogContext(),
+				},
+			)
+			apiLogger.debug('Request headers {headers}', {
+				headers: {
+					Accept: 'application/json',
+					'Content-Type': 'application/json',
+					Authorization: 'Bearer [REDACTED]',
+					'Xero-tenant-id': options.tenantId,
+					...(init.headers ?? {}),
+				},
 				...getLogContext(),
 			})
 			emitEvent(options.eventsConfig ?? { url: null }, 'xero-fetch-started', {

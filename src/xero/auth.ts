@@ -1,9 +1,12 @@
 import { timingSafeEqual } from 'node:crypto'
 import { readFile, unlink, writeFile } from 'node:fs/promises'
 import { z } from 'zod'
+import { getXeroLogger } from '../logging'
 import { isProcessAlive } from '../util/process'
 import { loadEnvConfig, saveXeroConfig } from './config'
 import { XeroApiError, XeroAuthError, XeroConflictError } from './errors'
+
+const authLogger = getXeroLogger(['auth'])
 
 const KEYCHAIN_SERVICE = 'xero-cli'
 const KEYCHAIN_ACCOUNT = 'default'
@@ -131,8 +134,8 @@ function classifyKeychainError(message: string): {
 async function readKeychain(): Promise<StoredTokens | null> {
 	if (process.env.XERO_TEST_TOKENS) {
 		if (!isTestEnvironment()) {
-			console.warn(
-				'[xero-cli] XERO_TEST_TOKENS is set but NODE_ENV/BUN_ENV is not "test" -- ignoring for safety.',
+			authLogger.warn(
+				'XERO_TEST_TOKENS is set but NODE_ENV/BUN_ENV is not "test" -- ignoring for safety.',
 			)
 		} else {
 			try {

@@ -390,6 +390,13 @@ export function parseCli(argv: readonly string[]): ParseCliResult {
 				quiet,
 			)
 		}
+		if ((thisQuarter || lastQuarter) && (sinceRaw || untilRaw)) {
+			return parseUsageError(
+				'--this-quarter/--last-quarter cannot be combined with --since/--until',
+				json,
+				quiet,
+			)
+		}
 		const page = pageRaw ? Number(pageRaw) : null
 		const limit = limitRaw ? Number(limitRaw) : null
 		if (pageRaw && (page === null || !Number.isInteger(page) || page <= 0)) {

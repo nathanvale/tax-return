@@ -2,6 +2,10 @@ import { xeroFetch } from '../../xero/api'
 import { loadValidTokens } from '../../xero/auth'
 import { loadEnvConfig, loadXeroConfig } from '../../xero/config'
 import { escapeODataValue } from '../../xero/odata'
+import type {
+	BankTransactionRecord,
+	BankTransactionsResponse,
+} from '../../xero/types'
 import type { ExitCode, OutputContext } from '../output'
 import {
 	EXIT_OK,
@@ -19,20 +23,6 @@ interface HistoryCommand {
 	readonly contact: string | null
 	readonly accountCode: string | null
 	readonly fields: readonly string[] | null
-}
-
-interface BankTransactionRecord {
-	readonly BankTransactionID?: string
-	readonly Contact?: { Name?: string }
-	readonly Total?: number
-	readonly DateString?: string
-	readonly Type?: string
-	readonly CurrencyCode?: string
-	readonly LineItems?: { AccountCode?: string }[]
-}
-
-interface TransactionsResponse {
-	readonly BankTransactions: BankTransactionRecord[]
 }
 
 interface HistoryRow {

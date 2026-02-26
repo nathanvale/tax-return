@@ -66,16 +66,23 @@ export function writeSuccess<T>(
 	data: T,
 	humanLines: string[],
 	quietLine: string,
+	warnings?: readonly string[],
 ): void {
+	const activeWarnings = warnings && warnings.length > 0 ? warnings : undefined
 	if (ctx.json) {
-		process.stdout.write(
-			`${JSON.stringify({
-				status: 'data',
-				schemaVersion: SCHEMA_VERSION_OUTPUT,
-				data,
-			})}\n`,
-		)
+		const envelope: Record<string, unknown> = {
+			status: 'data',
+			schemaVersion: SCHEMA_VERSION_OUTPUT,
+			data,
+		}
+		if (activeWarnings) envelope.warnings = activeWarnings
+		process.stdout.write(`${JSON.stringify(envelope)}\n`)
 		return
+	}
+	if (activeWarnings) {
+		for (const w of activeWarnings) {
+			process.stderr.write(`Warning: ${w}\n`)
+		}
 	}
 	if (ctx.quiet) {
 		process.stdout.write(`${quietLine}\n`)
@@ -145,6 +152,30 @@ export function projectFields<T extends Record<string, unknown>>(
 }
 
 /**
+ * Detect projected fields that are undefined in ALL records.
+ * When every record has undefined for a given field, it is almost certainly
+ * a typo rather than legitimately missing data. Returns warning messages
+ * for each such field. Skips detection when there are no records (empty
+ * result sets should not produce false positives).
+ */
+export function detectAllUndefinedFields(
+	records: Record<string, unknown>[],
+	fields: readonly string[] | null,
+): string[] {
+	if (!fields || records.length === 0) return []
+	const warnings: string[] = []
+	for (const field of fields) {
+		const allUndefined = records.every((record) => record[field] === undefined)
+		if (allUndefined) {
+			warnings.push(
+				`field '${field}' was undefined in all records -- check spelling.`,
+			)
+		}
+	}
+	return warnings
+}
+
+/**
  * Sanitize error messages to prevent token/secret leakage in output.
  * Redacts Bearer tokens, OAuth params, and tenant IDs.
  */
@@ -171,7 +202,7 @@ export function handleCommandError(ctx: OutputContext, err: unknown): ExitCode {
 	}
 	if (err instanceof XeroConflictError) {
 		writeError(ctx, err.message, err.code, err.name, err.context)
-		return EXIT_RUNTIME
+		return EXIT_CONFLICT
 	}
 	if (err instanceof XeroApiError) {
 		writeError(ctx, err.message, err.code, err.name, err.context)

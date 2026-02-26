@@ -4,6 +4,7 @@ import { loadEnvConfig, loadXeroConfig } from '../../xero/config'
 import { escapeODataValue } from '../../xero/odata'
 import type { ExitCode, OutputContext } from '../output'
 import {
+	detectAllUndefinedFields,
 	EXIT_OK,
 	EXIT_UNAUTHORIZED,
 	handleCommandError,

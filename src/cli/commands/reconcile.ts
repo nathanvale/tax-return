@@ -363,7 +363,8 @@ async function loadCsv(pathname: string): Promise<ReconcileInputBase[]> {
 		if (!record.BankTransactionID) continue
 		inputs.push({
 			BankTransactionID: record.BankTransactionID,
-			AccountCode: record.AccountCode || undefined,
+			AccountCode:
+				record.AccountCode || record.SuggestedAccountCode || undefined,
 			InvoiceID: record.InvoiceID || undefined,
 			Amount: record.Amount ? Number(record.Amount) : undefined,
 			CurrencyCode: record.CurrencyCode || undefined,
@@ -756,9 +757,25 @@ export async function runReconcile(
 			.filter((input) => !unreconciledSet.has(input.BankTransactionID))
 			.map((input) => input.BankTransactionID)
 		if (invalidIds.length > 0) {
-			throw new Error(
-				`Input contains reconciled/missing IDs: ${invalidIds.join(', ')}`,
+			// Cross-reference invalid IDs against the full transaction set
+			// to distinguish "already reconciled" from "not found"
+			const fullLookup = await fetchBankTransactionsBatch(
+				tokens.accessToken,
+				config.tenantId,
+				invalidIds,
+				{ eventsConfig: ctx.eventsConfig, onRetry: retryHandler },
 			)
+			const alreadyReconciled = invalidIds.filter((id) => fullLookup.has(id))
+			const notFound = invalidIds.filter((id) => !fullLookup.has(id))
+
+			const lines: string[] = []
+			for (const id of alreadyReconciled) {
+				lines.push(`Already reconciled: ${id}`)
+			}
+			for (const id of notFound) {
+				lines.push(`Not found: ${id}`)
+			}
+			throw new Error(lines.join('\n'))
 		}
 
 		const invalidCodes = inputs
@@ -907,6 +924,7 @@ export async function runReconcile(
 							BankTransactionID: input.BankTransactionID,
 							AccountCode: input.AccountCode,
 							status: 'reconciled',
+							originalLineItems: pre.LineItems,
 						})
 					}
 					processedCount += 1

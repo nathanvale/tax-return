@@ -162,3 +162,86 @@ describe('--fields flag routing', () => {
 		}
 	})
 })
+
+describe('date range flag conflicts', () => {
+	it('rejects --this-quarter combined with --since', () => {
+		const result = parseCli([
+			'node',
+			'xero-cli',
+			'transactions',
+			'--this-quarter',
+			'--since',
+			'2025-01-01',
+			'--json',
+		])
+		expect(result.ok).toBe(false)
+		if (!result.ok) {
+			expect(result.message).toContain(
+				'--this-quarter/--last-quarter cannot be combined with --since/--until',
+			)
+		}
+	})
+
+	it('rejects --last-quarter combined with --until', () => {
+		const result = parseCli([
+			'node',
+			'xero-cli',
+			'transactions',
+			'--last-quarter',
+			'--until',
+			'2025-12-31',
+			'--json',
+		])
+		expect(result.ok).toBe(false)
+		if (!result.ok) {
+			expect(result.message).toContain(
+				'--this-quarter/--last-quarter cannot be combined with --since/--until',
+			)
+		}
+	})
+
+	it('rejects triple combination --this-quarter --since --until', () => {
+		const result = parseCli([
+			'node',
+			'xero-cli',
+			'transactions',
+			'--this-quarter',
+			'--since',
+			'2025-01-01',
+			'--until',
+			'2025-12-31',
+			'--json',
+		])
+		expect(result.ok).toBe(false)
+		if (!result.ok) {
+			expect(result.message).toContain(
+				'--this-quarter/--last-quarter cannot be combined with --since/--until',
+			)
+		}
+	})
+
+	it('still allows --this-quarter alone', () => {
+		const result = parseCli(['node', 'xero-cli', 'transactions', '--this-quarter', '--json'])
+		expect(result.ok).toBe(true)
+		if (result.ok) {
+			expect(result.options.command).toBe('transactions')
+		}
+	})
+
+	it('still allows --since and --until without quarter flags', () => {
+		const result = parseCli([
+			'node',
+			'xero-cli',
+			'transactions',
+			'--since',
+			'2025-01-01',
+			'--until',
+			'2025-12-31',
+			'--json',
+		])
+		expect(result.ok).toBe(true)
+		if (result.ok) {
+			expect(result.options.command).toBe('transactions')
+		}
+	})
+})

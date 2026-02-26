@@ -1,6 +1,10 @@
 import { xeroFetch } from '../../xero/api'
 import { loadValidTokens } from '../../xero/auth'
 import { loadEnvConfig, loadXeroConfig } from '../../xero/config'
+import type {
+	BankTransactionRecord,
+	BankTransactionsResponse,
+} from '../../xero/types'
 import type { ExitCode, OutputContext } from '../output'
 import {
 	EXIT_OK,
@@ -22,20 +26,6 @@ interface TransactionsCommand {
 	readonly limit: number | null
 	readonly summary: boolean
 	readonly fields: readonly string[] | null
-}
-
-interface BankTransactionRecord {
-	readonly BankTransactionID?: string
-	readonly Type?: string
-	readonly Date?: string
-	readonly DateString?: string
-	readonly Total?: number
-	readonly Contact?: { Name?: string }
-	readonly Reference?: string
-}
-
-interface TransactionsResponse {
-	readonly BankTransactions: BankTransactionRecord[]
 }
 
 /**
@@ -194,7 +184,7 @@ export async function runTransactions(
 			? `/BankTransactions?${params.toString()}`
 			: '/BankTransactions'
 
-		const response = await xeroFetch<TransactionsResponse>(
+		const response = await xeroFetch<BankTransactionsResponse>(
 			path,
 			{ method: 'GET' },
 			{
