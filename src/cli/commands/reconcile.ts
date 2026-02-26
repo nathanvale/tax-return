@@ -52,6 +52,9 @@ const ReconcileItemSchema = z
 	.refine((value) => !(value.AccountCode && value.InvoiceID), {
 		message: 'AccountCode and InvoiceID are mutually exclusive',
 	})
+	.refine((value) => value.AccountCode || value.InvoiceID, {
+		message: 'Either AccountCode or InvoiceID is required',
+	})
 
 const ReconcileArraySchema = z.array(ReconcileItemSchema).min(1).max(1000)
 

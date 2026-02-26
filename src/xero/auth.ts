@@ -384,12 +384,7 @@ async function withRefreshLock<T>(fn: () => Promise<T>): Promise<T> {
 			try {
 				const raw = await readFile(lockPath, 'utf8')
 				const parsed = JSON.parse(raw) as { pid?: number; createdAt?: number }
-				const age = Date.now() - (parsed.createdAt ?? 0)
-				if (
-					parsed.pid &&
-					isProcessAlive(parsed.pid) &&
-					age < REFRESH_LOCK_TIMEOUT_MS
-				) {
+				if (parsed.pid && isProcessAlive(parsed.pid)) {
 					if (Date.now() - start > REFRESH_LOCK_TIMEOUT_MS) {
 						throw new XeroConflictError('Token refresh already in progress', {
 							code: 'E_LOCK_CONTENTION',
