@@ -514,7 +514,7 @@ async function fetchAccounts(
 		(response.Accounts ?? [])
 			.filter((account) => account.Status === 'ACTIVE')
 			.map((account) => account.Code)
-			.filter(Boolean) as string[],
+			.filter((code): code is string => typeof code === 'string'),
 	)
 }
 
@@ -769,8 +769,8 @@ export async function runReconcile(
 		}
 
 		const invoiceIds = inputs
-			.filter((input) => input.InvoiceID)
-			.map((input) => input.InvoiceID) as string[]
+			.map((input) => input.InvoiceID)
+			.filter((id): id is string => typeof id === 'string')
 		const invoicesById =
 			invoiceIds.length > 0
 				? await fetchInvoices(tokens.accessToken, config.tenantId, invoiceIds, {
@@ -1033,10 +1033,16 @@ export async function runReconcile(
 
 		const summary = {
 			total: results.length,
-			succeeded: results.filter((r) => r.status === 'reconciled').length,
-			failed: results.filter((r) => r.status === 'failed').length,
-			skipped: results.filter((r) => r.status === 'skipped').length,
-			dryRun: results.filter((r) => r.status === 'dry-run').length,
+			succeeded: 0,
+			failed: 0,
+			skipped: 0,
+			dryRun: 0,
+		}
+		for (const r of results) {
+			if (r.status === 'reconciled') summary.succeeded += 1
+			else if (r.status === 'failed') summary.failed += 1
+			else if (r.status === 'skipped') summary.skipped += 1
+			else if (r.status === 'dry-run') summary.dryRun += 1
 		}
 
 		const byAccount = new Map<string, { count: number; total: number }>()

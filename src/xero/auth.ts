@@ -1,6 +1,7 @@
 import { timingSafeEqual } from 'node:crypto'
 import { readFile, unlink, writeFile } from 'node:fs/promises'
 import { z } from 'zod'
+import { isProcessAlive } from '../util/process'
 import { loadEnvConfig, saveXeroConfig } from './config'
 import { XeroApiError, XeroAuthError, XeroConflictError } from './errors'
 
@@ -368,15 +369,6 @@ function resolveRefreshLockPath(): string {
 	return `${process.cwd()}/${REFRESH_LOCK_FILE}`
 }
 
-function isProcessAlive(pid: number): boolean {
-	try {
-		process.kill(pid, 0)
-		return true
-	} catch {
-		return false
-	}
-}
-
 async function withRefreshLock<T>(fn: () => Promise<T>): Promise<T> {
 	const lockPath = resolveRefreshLockPath()
 	const start = Date.now()
@@ -501,7 +493,7 @@ export async function waitForAuthCode(
 	})
 }
 
-/** Begin OAuth flow, store tokens, and persist tenant config. */
+/** Revoke a single token via Xero's revocation endpoint. */
 async function revokeToken(token: string): Promise<void> {
 	const { clientId } = loadEnvConfig()
 	const response = await fetch(REVOCATION_URL, {

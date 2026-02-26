@@ -1,6 +1,7 @@
 import { existsSync, lstatSync } from 'node:fs'
 import { readFile, unlink, writeFile } from 'node:fs/promises'
 import path from 'node:path'
+import { isProcessAlive } from '../util/process'
 
 const LOCK_FILE = '.xero-reconcile-lock.json'
 const LOCK_MODE = 0o600
@@ -13,15 +14,6 @@ interface LockPayload {
 
 function resolveLockPath(): string {
 	return path.join(process.cwd(), LOCK_FILE)
-}
-
-function isProcessAlive(pid: number): boolean {
-	try {
-		process.kill(pid, 0)
-		return true
-	} catch {
-		return false
-	}
 }
 
 async function readLock(): Promise<LockPayload | null> {

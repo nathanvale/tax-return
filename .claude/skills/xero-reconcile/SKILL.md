@@ -22,11 +22,35 @@ Agent runbook for reconciling Xero bank transactions via `xero-cli`. This skill 
 
 ## Workflow
 
+### 0) Preflight check
+
+```bash
+bun run xero-cli status --json
+```
+
+Checks env, config, keychain, state file, lock file, audit dir, and API connectivity. Returns a `diagnosis` field (`ok`, `needs-auth`, `invalid-config`, `api-error`, `keychain-locked`, `keychain-denied`, `fs-error`) and a `nextAction` hint. Run this before any workflow to verify readiness.
+
 ### 1) Auth (first run only)
+
+**Important:** Auth requires human interaction. It starts a local callback server on `127.0.0.1:5555` and opens a browser for Xero OAuth2 PKCE login. A human must complete the login in the browser before the CLI can proceed.
 
 ```bash
 bun run xero-cli auth
 ```
+
+Optional timeout (seconds, default 300):
+
+```bash
+bun run xero-cli auth --auth-timeout 120
+```
+
+**Headless/agent mode:** When running in a non-TTY environment or when `XERO_HEADLESS=1` is set, the CLI does not open a browser. Instead it emits the auth URL as structured JSON to stdout:
+
+```json
+{ "authUrl": "https://login.xero.com/identity/connect/authorize?..." }
+```
+
+The agent or orchestrator must present this URL to a human for completion. The callback server still listens on `127.0.0.1:5555` and the CLI blocks until the callback arrives or the timeout expires.
 
 Success indicators:
 - Output includes tenant ID saved to `.xero-config.json`
@@ -44,6 +68,26 @@ For large sets, use summary first:
 bun run xero-cli transactions --unreconciled --summary
 ```
 
+Pagination and limiting:
+
+```bash
+# Server-side pagination (Xero API page number, 1-based)
+bun run xero-cli transactions --unreconciled --json --page 1
+
+# Client-side limit (return only first N rows)
+bun run xero-cli transactions --unreconciled --json --limit 20
+```
+
+Date range filters:
+
+```bash
+bun run xero-cli transactions --since 2026-01-01 --until 2026-03-31 --json
+bun run xero-cli transactions --this-quarter --json
+bun run xero-cli transactions --last-quarter --json
+```
+
+Note: `--this-quarter` and `--last-quarter` are mutually exclusive. When `--summary` is used without an explicit date range, it defaults to the current quarter.
+
 Token-efficient projection:
 
 ```bash
@@ -56,10 +100,60 @@ bun run xero-cli transactions --unreconciled --json --fields BankTransactionID,T
 bun run xero-cli accounts --json
 ```
 
+Filter by account type:
+
+```bash
+bun run xero-cli accounts --type REVENUE --json
+```
+
+Token-efficient projection:
+
+```bash
+bun run xero-cli accounts --json --fields Code,Name,Type
+```
+
 ### 4) Pull reconciliation history (optional signal)
 
 ```bash
 bun run xero-cli history --since YYYY-MM-DD --json
+```
+
+`--since` is required. Optional filters:
+
+```bash
+bun run xero-cli history --since 2025-01-01 --contact "Acme Corp" --json
+bun run xero-cli history --since 2025-01-01 --account-code 400 --json
+```
+
+Token-efficient projection:
+
+```bash
+bun run xero-cli history --since 2025-01-01 --json --fields Contact,AccountCode,Count,AmountMin,AmountMax
+```
+
+### 4a) Pull invoices (for invoice-based reconciliation)
+
+```bash
+bun run xero-cli invoices --json
+```
+
+**Default filter:** When no `--status` or `--type` is specified, the invoices command defaults to `Status=="AUTHORISED"` (i.e., only outstanding invoices). Specifying any filter overrides this default.
+
+```bash
+# Filter by status (overrides the AUTHORISED default)
+bun run xero-cli invoices --status PAID --json
+
+# Filter by type
+bun run xero-cli invoices --type ACCREC --json
+
+# Both filters combined
+bun run xero-cli invoices --status AUTHORISED --type ACCREC --json
+```
+
+Token-efficient projection:
+
+```bash
+bun run xero-cli invoices --json --fields InvoiceID,Contact.Name,Total,AmountDue,CurrencyCode
 ```
 
 ### 5) Analyze + propose
@@ -165,6 +259,28 @@ If writes fail mid-run:
 - Use `--fields` to reduce payload sizes.
 - Prefer `--summary` when scanning large lists.
 - Avoid pulling full transactions unless needed.
+
+## Output Mode
+
+- **Auto-JSON:** When stdout is not a TTY (e.g., piped or agent-invoked), `--json` is enabled automatically. No need to pass it explicitly in agent workflows.
+- `--quiet` outputs minimal single-line results.
+- `--verbose` and `--debug` emit structured logs to stderr.
+
+## Command Aliases
+
+For brevity in interactive use:
+
+| Alias | Full command |
+|-------|-------------|
+| `tx` | `transactions` |
+| `acct` | `accounts` |
+| `inv` | `invoices` |
+| `rec` | `reconcile` |
+| `hist` | `history` |
+
+## `--fields` Support
+
+The `--fields` flag is available on all list commands: `accounts`, `transactions`, `history`, and `invoices`. It accepts a comma-separated list of dot-path field names (e.g., `Contact.Name`, `LineItems.AccountCode`). Fields must match the pattern `[A-Za-z0-9_.]`.
 
 ## Safety Notes
 

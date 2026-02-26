@@ -2,8 +2,12 @@ import { existsSync, lstatSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import path from 'node:path'
 import { xeroFetch } from '../../xero/api'
-import { isTokenExpired, loadTokens } from '../../xero/auth'
-import { loadEnvConfig, loadXeroConfig } from '../../xero/config'
+import { isTokenExpired, loadTokens, type StoredTokens } from '../../xero/auth'
+import {
+	loadEnvConfig,
+	loadXeroConfig,
+	type XeroConfig,
+} from '../../xero/config'
 import { XeroAuthError } from '../../xero/errors'
 import type { ExitCode, OutputContext } from '../output'
 import {
@@ -67,7 +71,7 @@ export async function runStatus(ctx: OutputContext): Promise<ExitCode> {
 		})
 	}
 
-	let config: Awaited<ReturnType<typeof loadXeroConfig>> | null = null
+	let config: XeroConfig | null = null
 	try {
 		config = await loadXeroConfig()
 		if (!config) {
@@ -89,7 +93,7 @@ export async function runStatus(ctx: OutputContext): Promise<ExitCode> {
 		})
 	}
 
-	let tokens: Awaited<ReturnType<typeof loadTokens>> | null = null
+	let tokens: StoredTokens | null = null
 	try {
 		tokens = await loadTokens()
 		tokensExpired = isTokenExpired(tokens.expiresAt)

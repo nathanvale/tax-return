@@ -1,7 +1,8 @@
-import { existsSync, lstatSync } from 'node:fs'
+import { existsSync } from 'node:fs'
 import { mkdir, open, readFile, rename, stat, unlink } from 'node:fs/promises'
 import path from 'node:path'
 import { z } from 'zod'
+import { assertSecureFile } from '../util/fs'
 
 const CONFIG_FILENAME = '.xero-config.json'
 const CONFIG_MODE = 0o600
@@ -26,21 +27,15 @@ function resolveConfigPath(): string {
 	return path.join(process.cwd(), CONFIG_FILENAME)
 }
 
-function assertSecureFile(targetPath: string): void {
-	const statInfo = lstatSync(targetPath)
-	if (statInfo.isSymbolicLink()) {
-		throw new Error(`Refusing to read symlinked config file: ${targetPath}`)
-	}
-	const mode = statInfo.mode & 0o777
-	if ((mode & 0o077) !== 0) {
-		throw new Error(
-			`Config file permissions too open: ${targetPath} (${mode.toString(8)})`,
-		)
-	}
-}
+let cachedEnvConfig: EnvConfig | null = null
 
-/** Load Xero environment config from process.env. */
+/**
+ * Load Xero environment config from process.env.
+ * Result is cached after the first successful call since env vars
+ * do not change during a CLI invocation.
+ */
 export function loadEnvConfig(): EnvConfig {
+	if (cachedEnvConfig) return cachedEnvConfig
 	const result = EnvSchema.safeParse({
 		XERO_CLIENT_ID: process.env.XERO_CLIENT_ID,
 	})
@@ -48,7 +43,13 @@ export function loadEnvConfig(): EnvConfig {
 		const message = result.error.issues.map((issue) => issue.message).join('; ')
 		throw new Error(`Invalid env config: ${message}`)
 	}
-	return { clientId: result.data.XERO_CLIENT_ID }
+	cachedEnvConfig = { clientId: result.data.XERO_CLIENT_ID }
+	return cachedEnvConfig
+}
+
+/** Reset the cached env config (for testing). */
+export function resetEnvConfigCache(): void {
+	cachedEnvConfig = null
 }
 
 /** Load the xero-cli config file, or return null if it doesn't exist. */

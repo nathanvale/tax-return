@@ -104,6 +104,46 @@ interface ParseCliOk {
 
 type ParseCliResult = ParseCliError | ParseCliOk
 
+/**
+ * Result of attempting to parse a value-taking flag (e.g. --flag value or --flag=value).
+ * Returns null when the token does not match the flag name at all.
+ */
+type ValueFlagResult =
+	| null
+	| { readonly value: string; readonly nextIndex: number }
+	| ParseCliError
+
+/**
+ * Parse a value-taking flag that supports both `--flag value` and `--flag=value` forms.
+ * Returns null if the token does not match the flag, a ParseCliError if the value is
+ * missing, or the parsed value and next loop index on success.
+ */
+function parseValueFlag(
+	token: string,
+	args: readonly string[],
+	index: number,
+	flag: string,
+	json: boolean,
+	quiet: boolean,
+): ValueFlagResult {
+	if (token === flag) {
+		const value = args[index + 1]
+		if (!value || value.startsWith('--')) {
+			return parseUsageError(`Missing value for ${flag}`, json, quiet)
+		}
+		return { value, nextIndex: index + 1 }
+	}
+	const prefix = `${flag}=`
+	if (token.startsWith(prefix)) {
+		const value = token.slice(prefix.length)
+		if (!value) {
+			return parseUsageError(`Missing value for ${flag}`, json, quiet)
+		}
+		return { value, nextIndex: index }
+	}
+	return null
+}
+
 /** Parse argv into structured command options.
  *  Returns a discriminated union instead of throwing to preserve output mode. */
 export function parseCli(argv: readonly string[]): ParseCliResult {
@@ -177,212 +217,99 @@ export function parseCli(argv: readonly string[]): ParseCliResult {
 			execute = false
 			continue
 		}
-		if (token === '--from-csv') {
-			const value = args[i + 1]
-			if (!value || value.startsWith('--')) {
-				return parseUsageError('Missing value for --from-csv', json, quiet)
-			}
-			fromCsv = value
-			i += 1
-			continue
+		// -- Value-taking flags (--flag value / --flag=value) --
+		// Each flag is parsed via parseValueFlag to avoid ~14 lines of boilerplate per flag.
+		const valueFlagDefs: Array<{
+			flag: string
+			assign: (v: string) => void
+		}> = [
+			{
+				flag: '--from-csv',
+				assign: (v) => {
+					fromCsv = v
+				},
+			},
+			{
+				flag: '--contact',
+				assign: (v) => {
+					contactRaw = v
+				},
+			},
+			{
+				flag: '--account-code',
+				assign: (v) => {
+					accountCodeRaw = v
+				},
+			},
+			{
+				flag: '--status',
+				assign: (v) => {
+					statusRaw = v
+				},
+			},
+			{
+				flag: '--events-url',
+				assign: (v) => {
+					eventsUrl = v
+				},
+			},
+			{
+				flag: '--auth-timeout',
+				assign: (v) => {
+					authTimeoutRaw = v
+				},
+			},
+			{
+				flag: '--fields',
+				assign: (v) => {
+					fieldsRaw = v
+				},
+			},
+			{
+				flag: '--type',
+				assign: (v) => {
+					typeRaw = v
+				},
+			},
+			{
+				flag: '--since',
+				assign: (v) => {
+					sinceRaw = v
+				},
+			},
+			{
+				flag: '--until',
+				assign: (v) => {
+					untilRaw = v
+				},
+			},
+			{
+				flag: '--page',
+				assign: (v) => {
+					pageRaw = v
+				},
+			},
+			{
+				flag: '--limit',
+				assign: (v) => {
+					limitRaw = v
+				},
+			},
+		]
+		let valueFlagMatched = false
+		for (const { flag, assign } of valueFlagDefs) {
+			const result = parseValueFlag(token, args, i, flag, json, quiet)
+			if (result === null) continue
+			if ('ok' in result) return result // ParseCliError
+			assign(result.value)
+			i = result.nextIndex
+			valueFlagMatched = true
+			break
 		}
-		if (token === '--contact') {
-			const value = args[i + 1]
-			if (!value || value.startsWith('--')) {
-				return parseUsageError('Missing value for --contact', json, quiet)
-			}
-			contactRaw = value
-			i += 1
-			continue
-		}
-		if (token.startsWith('--contact=')) {
-			const value = token.slice('--contact='.length)
-			if (!value) {
-				return parseUsageError('Missing value for --contact', json, quiet)
-			}
-			contactRaw = value
-			continue
-		}
-		if (token === '--account-code') {
-			const value = args[i + 1]
-			if (!value || value.startsWith('--')) {
-				return parseUsageError('Missing value for --account-code', json, quiet)
-			}
-			accountCodeRaw = value
-			i += 1
-			continue
-		}
-		if (token.startsWith('--account-code=')) {
-			const value = token.slice('--account-code='.length)
-			if (!value) {
-				return parseUsageError('Missing value for --account-code', json, quiet)
-			}
-			accountCodeRaw = value
-			continue
-		}
-		if (token === '--status') {
-			const value = args[i + 1]
-			if (!value || value.startsWith('--')) {
-				return parseUsageError('Missing value for --status', json, quiet)
-			}
-			statusRaw = value
-			i += 1
-			continue
-		}
-		if (token.startsWith('--status=')) {
-			const value = token.slice('--status='.length)
-			if (!value) {
-				return parseUsageError('Missing value for --status', json, quiet)
-			}
-			statusRaw = value
-			continue
-		}
-		if (token.startsWith('--from-csv=')) {
-			const value = token.slice('--from-csv='.length)
-			if (!value) {
-				return parseUsageError('Missing value for --from-csv', json, quiet)
-			}
-			fromCsv = value
-			continue
-		}
-		if (token === '--events-url') {
-			const value = args[i + 1]
-			if (!value || value.startsWith('--')) {
-				return parseUsageError('Missing value for --events-url', json, quiet)
-			}
-			eventsUrl = value
-			i += 1
-			continue
-		}
-		if (token.startsWith('--events-url=')) {
-			const value = token.slice('--events-url='.length)
-			if (!value) {
-				return parseUsageError('Missing value for --events-url', json, quiet)
-			}
-			eventsUrl = value
-			continue
-		}
-		if (token === '--auth-timeout') {
-			const value = args[i + 1]
-			if (!value || value.startsWith('--')) {
-				return parseUsageError('Missing value for --auth-timeout', json, quiet)
-			}
-			authTimeoutRaw = value
-			i += 1
-			continue
-		}
-		if (token.startsWith('--auth-timeout=')) {
-			const value = token.slice('--auth-timeout='.length)
-			if (!value) {
-				return parseUsageError('Missing value for --auth-timeout', json, quiet)
-			}
-			authTimeoutRaw = value
-			continue
-		}
+		if (valueFlagMatched) continue
+
 		if (token === '--help' || token === '-h') {
 			help = true
-			continue
-		}
-		if (token === '--fields') {
-			const value = args[i + 1]
-			if (!value || value.startsWith('--')) {
-				return parseUsageError('Missing value for --fields', json, quiet)
-			}
-			fieldsRaw = value
-			i += 1
-			continue
-		}
-		if (token.startsWith('--fields=')) {
-			const value = token.slice('--fields='.length)
-			if (!value) {
-				return parseUsageError('Missing value for --fields', json, quiet)
-			}
-			fieldsRaw = value
-			continue
-		}
-		if (token === '--type') {
-			const value = args[i + 1]
-			if (!value || value.startsWith('--')) {
-				return parseUsageError('Missing value for --type', json, quiet)
-			}
-			typeRaw = value
-			i += 1
-			continue
-		}
-		if (token.startsWith('--type=')) {
-			const value = token.slice('--type='.length)
-			if (!value) {
-				return parseUsageError('Missing value for --type', json, quiet)
-			}
-			typeRaw = value
-			continue
-		}
-		if (token === '--since') {
-			const value = args[i + 1]
-			if (!value || value.startsWith('--')) {
-				return parseUsageError('Missing value for --since', json, quiet)
-			}
-			sinceRaw = value
-			i += 1
-			continue
-		}
-		if (token.startsWith('--since=')) {
-			const value = token.slice('--since='.length)
-			if (!value) {
-				return parseUsageError('Missing value for --since', json, quiet)
-			}
-			sinceRaw = value
-			continue
-		}
-		if (token === '--until') {
-			const value = args[i + 1]
-			if (!value || value.startsWith('--')) {
-				return parseUsageError('Missing value for --until', json, quiet)
-			}
-			untilRaw = value
-			i += 1
-			continue
-		}
-		if (token.startsWith('--until=')) {
-			const value = token.slice('--until='.length)
-			if (!value) {
-				return parseUsageError('Missing value for --until', json, quiet)
-			}
-			untilRaw = value
-			continue
-		}
-		if (token === '--page') {
-			const value = args[i + 1]
-			if (!value || value.startsWith('--')) {
-				return parseUsageError('Missing value for --page', json, quiet)
-			}
-			pageRaw = value
-			i += 1
-			continue
-		}
-		if (token.startsWith('--page=')) {
-			const value = token.slice('--page='.length)
-			if (!value) {
-				return parseUsageError('Missing value for --page', json, quiet)
-			}
-			pageRaw = value
-			continue
-		}
-		if (token === '--limit') {
-			const value = args[i + 1]
-			if (!value || value.startsWith('--')) {
-				return parseUsageError('Missing value for --limit', json, quiet)
-			}
-			limitRaw = value
-			i += 1
-			continue
-		}
-		if (token.startsWith('--limit=')) {
-			const value = token.slice('--limit='.length)
-			if (!value) {
-				return parseUsageError('Missing value for --limit', json, quiet)
-			}
-			limitRaw = value
 			continue
 		}
 		if (token.startsWith('-')) {

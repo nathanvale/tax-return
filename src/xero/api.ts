@@ -36,7 +36,11 @@ function shouldRetryStatus(status: number): boolean {
 	)
 }
 
-function mapHttpError(status: number, message: string): XeroApiError {
+/** Map an HTTP status to a structured error. Throws XeroAuthError for 401/403. */
+function mapHttpError(
+	status: number,
+	message: string,
+): XeroApiError | XeroConflictError | never {
 	if (status === 401 || status === 403) {
 		throw new XeroAuthError(message, {
 			code: 'E_UNAUTHORIZED',

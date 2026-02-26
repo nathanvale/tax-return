@@ -1,4 +1,4 @@
-import { existsSync, lstatSync } from 'node:fs'
+import { existsSync } from 'node:fs'
 import {
 	mkdir,
 	readFile,
@@ -8,6 +8,7 @@ import {
 	writeFile,
 } from 'node:fs/promises'
 import path from 'node:path'
+import { assertSecureFile } from '../util/fs'
 
 const STATE_FILE = '.xero-reconcile-state.json'
 const STATE_MODE = 0o600
@@ -25,19 +26,6 @@ const EMPTY_STATE: ReconcileState = {
 
 function resolveStatePath(): string {
 	return path.join(process.cwd(), STATE_FILE)
-}
-
-function assertSecureFile(targetPath: string): void {
-	const statInfo = lstatSync(targetPath)
-	if (statInfo.isSymbolicLink()) {
-		throw new Error(`Refusing to read symlinked state file: ${targetPath}`)
-	}
-	const mode = statInfo.mode & 0o777
-	if ((mode & 0o077) !== 0) {
-		throw new Error(
-			`State file permissions too open: ${targetPath} (${mode.toString(8)})`,
-		)
-	}
 }
 
 async function ensureStateDir(): Promise<void> {
