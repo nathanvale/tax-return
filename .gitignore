@@ -60,3 +60,8 @@ website/.docusaurus/
 website/.cache-loader/
 website/build/
 website/node_modules/
+
+# Xero
+.xero-config.json
+.xero-reconcile-state.json
+.xero-session/
