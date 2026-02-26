@@ -241,6 +241,260 @@ class XeroApiError extends StructuredError { /* all other API errors (400, 429, 
 
 ---
 
+## Technical Specification: Xero API Types
+
+> Researched from official Xero developer documentation and the [Xero OpenAPI spec](https://github.com/XeroAPI/Xero-OpenAPI) (v11.0.0, MIT license).
+
+### Type Strategy: Lightweight Hand-Written Types
+
+For MVP, we use hand-written TypeScript interfaces based on the official Xero OpenAPI spec. This keeps dependencies at zero and types focused on the fields we actually use. The full OpenAPI spec (`xero_accounting.yaml`) is available at `github.com/XeroAPI/Xero-OpenAPI` if we need to generate comprehensive types later.
+
+**Why not Zod for MVP:**
+- We only read ~15 fields from each endpoint. Full schema validation adds complexity without proportional safety.
+- Our `assertValidPaymentResponse()` type guards (see reconcile.ts) validate the critical fields before state mutation.
+- Zod adds a runtime dependency. Hand-written type guards are zero-dependency and debuggable.
+- **Future option:** If we add more endpoints or the type surface grows, `openapi-typescript` can generate types from the official YAML spec.
+
+### Standard Response Envelope
+
+All Accounting API responses use this envelope (JSON format):
+
+```typescript
+/** Standard envelope for all Xero Accounting API responses */
+interface XeroResponse<T extends string, V> {
+  Id: string                    // Request UUID
+  Status: 'OK'                 // Always "OK" for HTTP 200
+  DateTimeUTC: string          // .NET date: "/Date(1439434356790)/"
+  pagination?: XeroPagination  // Only when ?page= param used
+  [K in T]: V[]                // Resource array: "Invoices", "Payments", etc.
+}
+
+interface XeroPagination {
+  page: number        // Current page (1-indexed)
+  pageSize: number    // Items per page (default 100, max 1000)
+  pageCount: number   // Total pages
+  itemCount: number   // Total items across all pages
+}
+```
+
+### Date Handling
+
+Xero uses .NET JSON date format. Helper to parse:
+
+```typescript
+/** Parse Xero's .NET JSON date format: "/Date(1439434356790+0000)/" */
+function parseXeroDate(xeroDate: string): Date {
+  const match = xeroDate.match(/\/Date\((\d+)/)
+  if (!match) throw new XeroApiError(`Invalid date format: ${xeroDate}`)
+  return new Date(Number(match[1]))
+}
+```
+
+### BankTransaction (GET /api.xro/2.0/BankTransactions)
+
+```typescript
+/** Fields we use from BankTransactions endpoint */
+interface XeroBankTransaction {
+  BankTransactionID: string
+  Type: 'RECEIVE' | 'SPEND' | 'RECEIVE-OVERPAYMENT' | 'SPEND-OVERPAYMENT'
+    | 'RECEIVE-PREPAYMENT' | 'SPEND-PREPAYMENT' | 'RECEIVE-TRANSFER' | 'SPEND-TRANSFER'
+  Contact: {
+    ContactID: string
+    Name: string
+  }
+  BankAccount: {
+    AccountID: string
+    Code?: string
+    Name?: string
+  }
+  Date: string              // .NET date format
+  DateString: string        // "2014-05-26T00:00:00"
+  Status: 'AUTHORISED' | 'DELETED'
+  SubTotal: string          // Decimal as string: "49.90"
+  TotalTax: string
+  Total: string             // Decimal as string -- parse with Number()
+  CurrencyCode: string      // ISO 4217 (e.g. "AUD")
+  IsReconciled: string      // "true" | "false" (STRING, not boolean!)
+  Reference?: string
+  LineItems?: XeroLineItem[]
+  UpdatedDateUTC: string
+}
+
+interface XeroLineItem {
+  LineItemID: string
+  Description?: string
+  Quantity?: string         // Decimal as string
+  UnitAmount?: string       // Decimal as string
+  AccountCode?: string
+  TaxType?: string
+  TaxAmount?: string
+  LineAmount?: string
+}
+```
+
+**Key gotchas:**
+- `IsReconciled` is a **string** ("true"/"false"), not a boolean
+- `Total`, `SubTotal`, `TotalTax` are **strings**, not numbers -- parse with `Number()`
+- Query: `GET /BankTransactions?where=IsReconciled==false AND Date>=DateTime(2025,01,01)&page=1&order=Date DESC`
+- Optimised filters: `Type==`, `Status==`, `Date` range, `Contact.ContactID==guid("...")`
+
+### Invoice (GET /api.xro/2.0/Invoices)
+
+```typescript
+/** Fields we use from Invoices endpoint */
+interface XeroInvoice {
+  InvoiceID: string
+  Type: 'ACCPAY' | 'ACCREC'      // ACCPAY=bill, ACCREC=sales invoice
+  InvoiceNumber: string
+  Reference?: string               // ACCREC only
+  Contact: {
+    ContactID: string
+    Name: string
+  }
+  Date: string
+  DueDate: string
+  Status: 'DRAFT' | 'SUBMITTED' | 'DELETED' | 'AUTHORISED' | 'PAID' | 'VOIDED'
+  SubTotal: number                  // NOTE: number (unlike BankTransaction)
+  TotalTax: number
+  Total: number
+  AmountDue: number                 // Outstanding amount
+  AmountPaid: number
+  CurrencyCode: string
+  CurrencyRate: number
+  UpdatedDateUTC: string
+  HasErrors?: boolean               // Batch responses only
+  ValidationErrors?: XeroValidationError[]
+}
+```
+
+**Key gotchas:**
+- Invoice amounts are **numbers** (unlike BankTransaction which uses strings)
+- Query: `GET /Invoices?Statuses=AUTHORISED&page=1` or `GET /Invoices?where=Status=="AUTHORISED"&page=1`
+- Use `AmountDue` for matching (not `Total` -- invoice may be partially paid)
+- Optimised filters: `Type==`, `Status==`, `Contact.ContactID==guid("...")`, `Date` range, `InvoiceNumber==`
+
+### Payment (PUT /api.xro/2.0/Payments)
+
+```typescript
+/** Create payment request */
+interface XeroCreatePayment {
+  Invoice: { InvoiceID: string } | { InvoiceNumber: string }
+  Account: { AccountID: string } | { Code: string }
+  Date: string                    // "YYYY-MM-DD"
+  Amount: number                  // In invoice currency, must be <= AmountDue
+  IsReconciled?: boolean          // true = auto-match with bank statement line
+  Reference?: string
+}
+
+/** Payment response (from GET or after PUT) */
+interface XeroPayment {
+  PaymentID: string
+  Date: string
+  Amount: number                  // In invoice currency
+  BankAmount: number              // In bank account currency
+  CurrencyRate: number
+  Reference?: string
+  IsReconciled: boolean           // NOTE: boolean (unlike BankTransaction!)
+  Status: 'AUTHORISED' | 'DELETED'
+  PaymentType: 'ACCRECPAYMENT' | 'ACCPAYPAYMENT' | 'ARCREDITPAYMENT' | 'APCREDITPAYMENT'
+  Account: {
+    AccountID: string
+    Code?: string
+  }
+  Invoice?: {
+    InvoiceID: string
+    InvoiceNumber: string
+    Type: 'ACCREC' | 'ACCPAY'
+    Contact?: { ContactID: string; Name: string }
+  }
+  HasValidationErrors?: boolean
+  ValidationErrors?: XeroValidationError[]
+  StatusAttributeString?: 'OK' | 'WARNING' | 'ERROR'
+  UpdatedDateUTC: string
+}
+```
+
+**Key gotchas:**
+- `IsReconciled` is a **boolean** here (unlike BankTransaction where it's a string!)
+- `Amount` must be <= `AmountDue` on the invoice -- API rejects overpayments
+- Delete a payment: `POST /Payments/{PaymentID}` with `{ "Status": "DELETED" }`
+- Batch: `PUT /Payments?SummarizeErrors=false` with `{ "Payments": [...] }` -- max 50 items
+
+### Connection (GET /connections -- Identity API)
+
+```typescript
+/** Connection from Identity API -- bare JSON array, no envelope */
+interface XeroConnection {
+  id: string              // Connection UUID
+  tenantId: string        // Use as xero-tenant-id header
+  tenantType: 'ORGANISATION' | 'PRACTICEMANAGER' | 'PRACTICE'
+  tenantName: string | null
+  createdDateUtc: string  // ISO 8601
+  updatedDateUtc: string
+}
+```
+
+**Important:** This is the **Identity API** at `https://api.xero.com/connections` (NOT `/api.xro/2.0/`). Returns a bare JSON array -- no envelope. The `tenantId` becomes the `xero-tenant-id` header for all Accounting API calls.
+
+### Organisation (GET /api.xro/2.0/Organisation)
+
+```typescript
+/** Minimal org info for preflight/display */
+interface XeroOrganisation {
+  OrganisationID: string
+  Name: string
+  LegalName: string
+  ShortCode: string       // Unique code e.g. "!23eYt"
+  BaseCurrency: string    // ISO 4217
+  CountryCode: string     // ISO 3166-2
+  IsDemoCompany: boolean
+  Version: string         // Region: "AU", "NZ", "UK", "US", "GLOBAL"
+}
+```
+
+### Validation Errors (batch responses)
+
+```typescript
+/** Per-item error from batch responses with ?SummarizeErrors=false */
+interface XeroValidationError {
+  Message: string         // Human-readable error description
+}
+
+/** Standard API error response (HTTP 400) */
+interface XeroApiErrorResponse {
+  ErrorNumber: number     // e.g. 10
+  Type: string            // e.g. "ValidationException"
+  Message: string         // e.g. "A validation exception occurred"
+  Elements?: Array<{
+    ValidationErrors: XeroValidationError[]
+  }>
+}
+```
+
+**Batch behavior with `?SummarizeErrors=false`:**
+- Always returns HTTP 200, even if individual items fail
+- Each item gets `StatusAttributeString: "OK" | "WARNING" | "ERROR"`
+- Failed items have `ValidationErrors` array and `HasValidationErrors: true`
+- Without this flag, a single validation error causes HTTP 400 for the whole batch
+
+### Empty Arrays and Null Handling
+
+Per Xero docs: "Due to JSON serialization behavior, a null object may be represented as an empty array." Always use optional chaining and nullish coalescing when accessing nested fields.
+
+### Sources
+
+- [Xero OpenAPI Spec (v11.0.0)](https://github.com/XeroAPI/Xero-OpenAPI) -- MIT license, official
+- [BankTransactions API](https://developer.xero.com/documentation/api/accounting/banktransactions)
+- [Invoices API](https://developer.xero.com/documentation/api/accounting/invoices)
+- [Payments API](https://developer.xero.com/documentation/api/accounting/payments)
+- [Contacts API](https://developer.xero.com/documentation/api/accounting/contacts)
+- [Organisation API](https://developer.xero.com/documentation/api/accounting/organisation)
+- [Connections (Identity API)](https://developer.xero.com/documentation/guides/oauth2/tenants)
+- [Response Codes](https://developer.xero.com/documentation/api/accounting/responsecodes)
+- [Types & Codes Reference](https://developer.xero.com/documentation/api/accounting/types)
+
+---
+
 ## Implementation Phases
 
 ### Phase 1: Auth + Read Transactions
