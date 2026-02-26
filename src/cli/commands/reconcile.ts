@@ -323,7 +323,14 @@ export function validateCsvPath(pathname: string, baseDir?: string): void {
 	}
 }
 
-async function loadCsv(pathname: string): Promise<ReconcileInputBase[]> {
+/** Result of CSV loading, including parsed inputs and import metadata. */
+interface CsvLoadResult {
+	readonly inputs: ReconcileInputBase[]
+	/** True if any record used SuggestedAccountCode instead of AccountCode. */
+	readonly usedFallbackColumn: boolean
+}
+
+async function loadCsv(pathname: string): Promise<CsvLoadResult> {
 	validateCsvPath(pathname)
 	const raw = await Bun.file(pathname).text()
 	const lines = raw.split(/\r?\n/).filter((line) => line.trim().length > 0)
@@ -337,6 +344,7 @@ async function loadCsv(pathname: string): Promise<ReconcileInputBase[]> {
 		}
 	}
 	const inputs: ReconcileInputBase[] = []
+	let usedFallbackColumn = false
 	for (const line of lines.slice(1)) {
 		const values = parseCsvLine(line)
 		const record: Record<string, string> = {}
@@ -344,16 +352,20 @@ async function loadCsv(pathname: string): Promise<ReconcileInputBase[]> {
 			record[key] = values[idx] ?? ''
 		})
 		if (!record.BankTransactionID) continue
+		const accountCode =
+			record.AccountCode || record.SuggestedAccountCode || undefined
+		if (!record.AccountCode && record.SuggestedAccountCode) {
+			usedFallbackColumn = true
+		}
 		inputs.push({
 			BankTransactionID: record.BankTransactionID,
-			AccountCode:
-				record.AccountCode || record.SuggestedAccountCode || undefined,
+			AccountCode: accountCode,
 			InvoiceID: record.InvoiceID || undefined,
 			Amount: record.Amount ? Number(record.Amount) : undefined,
 			CurrencyCode: record.CurrencyCode || undefined,
 		})
 	}
-	return validateInputs(inputs)
+	return { inputs: validateInputs(inputs), usedFallbackColumn }
 }
 
 async function ensureAuditDir(): Promise<string> {
@@ -663,7 +675,7 @@ export async function runReconcile(
 			lockAcquired = true
 			await pruneAudits()
 		}
-		const tokens = await loadValidTokens()
+		const tokens = await loadValidTokens(ctx.eventsConfig)
 		const config = await loadXeroConfig()
 		if (!config) {
 			writeError(
@@ -681,7 +693,21 @@ export async function runReconcile(
 				writeError(ctx, 'CSV file not found', 'E_USAGE', 'UsageError')
 				return EXIT_USAGE
 			}
-			inputs = await loadCsv(options.fromCsv)
+			try {
+				const csvResult = await loadCsv(options.fromCsv)
+				inputs = csvResult.inputs
+				emitEvent(ctx.eventsConfig, 'xero-csv-imported', {
+					rowCount: csvResult.inputs.length,
+					source: 'file',
+					usedFallbackColumn: csvResult.usedFallbackColumn,
+				})
+			} catch (err) {
+				emitEvent(ctx.eventsConfig, 'xero-csv-import-failed', {
+					error: err instanceof Error ? err.message : String(err),
+					source: 'file',
+				})
+				throw err
+			}
 		} else {
 			const raw = await readStdinWithLimit()
 			inputs = parseJsonInput(raw)
@@ -790,10 +816,37 @@ export async function runReconcile(
 				: new Map<string, BankTransactionRecord>()
 
 		const state = await loadState()
-		const stateBatcher = new StateBatcher(state)
+		const recoveredIds = Object.keys(state.processed)
 		const results: ReconcileResult[] = []
 		let processedCount = 0
 		const totalCount = inputs.length
+
+		if (recoveredIds.length > 0) {
+			reconcileLogger.info(
+				'Resuming from previous state with {recoveredCount} already processed',
+				{ recoveredCount: recoveredIds.length },
+			)
+			emitEvent(ctx.eventsConfig, 'xero-state-recovered', {
+				recoveredCount: recoveredIds.length,
+				totalCount,
+			})
+		}
+
+		const stateBatcher = new StateBatcher(
+			state,
+			undefined,
+			({ checkpointNumber }) => {
+				emitEvent(ctx.eventsConfig, 'xero-state-checkpoint', {
+					processedCount,
+					totalCount,
+					checkpointNumber,
+				})
+				reconcileLogger.debug(
+					'State checkpoint #{checkpointNumber} flushed at {processedCount}/{totalCount}',
+					{ checkpointNumber, processedCount, totalCount },
+				)
+			},
+		)
 
 		emitEvent(ctx.eventsConfig, 'xero-reconcile-started', {
 			mode: options.execute ? 'execute' : 'dry-run',
@@ -858,6 +911,7 @@ export async function runReconcile(
 				continue
 			}
 
+			const itemStart = performance.now()
 			try {
 				if (input.AccountCode) {
 					reconcileLogger.debug(
@@ -913,6 +967,12 @@ export async function runReconcile(
 						'Successfully reconciled {txnId} via AccountCode',
 						{ txnId: input.BankTransactionID },
 					)
+					emitEvent(ctx.eventsConfig, 'xero-reconcile-item-succeeded', {
+						bankTransactionId: input.BankTransactionID,
+						accountCode: input.AccountCode,
+						type: 'account-code',
+						durationMs: Math.round(performance.now() - itemStart),
+					})
 
 					const result: ReconcileResult = {
 						BankTransactionID: input.BankTransactionID,
@@ -993,6 +1053,12 @@ export async function runReconcile(
 							paymentId: payment.PaymentID,
 						},
 					)
+					emitEvent(ctx.eventsConfig, 'xero-reconcile-item-succeeded', {
+						bankTransactionId: input.BankTransactionID,
+						accountCode: undefined,
+						type: 'invoice-payment',
+						durationMs: Math.round(performance.now() - itemStart),
+					})
 					const result: ReconcileResult = {
 						BankTransactionID: input.BankTransactionID,
 						status: 'reconciled',

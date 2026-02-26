@@ -43,7 +43,7 @@ export async function runAccounts(
 ): Promise<ExitCode> {
 	try {
 		loadEnvConfig()
-		const tokens = await loadValidTokens()
+		const tokens = await loadValidTokens(ctx.eventsConfig)
 		const config = await loadXeroConfig()
 		if (!config) {
 			writeError(

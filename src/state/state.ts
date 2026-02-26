@@ -137,6 +137,8 @@ export class StateBatcher {
 		if (this.dirtyCount === 0) return
 		await saveState(this.snapshot())
 		this.dirtyCount = 0
+		this.flushCount += 1
+		this.onFlush?.({ checkpointNumber: this.flushCount })
 	}
 
 	/** Return a readonly snapshot of the current state. */

@@ -689,12 +689,12 @@ export async function runCli(argv: readonly string[]): Promise<ExitCode> {
 
 	return await withContext({ runId: randomUUID() }, async () => {
 		const startTime = Date.now()
+		const mode = resolveMode(ctx)
 		try {
 			setupLogging(ctx)
 			cliLogger.info('CLI started: {command}', {
 				command: options.command,
 			})
-			const mode = resolveMode(ctx)
 			emitEvent(ctx.eventsConfig, 'xero-cli-started', {
 				command: options.command,
 				mode,
@@ -792,6 +792,12 @@ export async function runCli(argv: readonly string[]): Promise<ExitCode> {
 				},
 			)
 			writeError(ctx, message, 'E_RUNTIME', 'RuntimeError')
+			emitEvent(ctx.eventsConfig, 'xero-cli-completed', {
+				command: options.command,
+				exitCode: EXIT_RUNTIME,
+				durationMs,
+				mode,
+			})
 			return EXIT_RUNTIME
 		} finally {
 			await shutdownLogging()

@@ -105,7 +105,7 @@ export async function runHistory(
 			writeError(ctx, 'history requires --since', 'E_USAGE', 'UsageError')
 			return EXIT_USAGE
 		}
-		const tokens = await loadValidTokens()
+		const tokens = await loadValidTokens(ctx.eventsConfig)
 		const config = await loadXeroConfig()
 		if (!config) {
 			writeError(
