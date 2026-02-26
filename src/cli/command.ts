@@ -541,11 +541,16 @@ function parseFields(
 	if (invalidFields.length > 0) {
 		return {
 			fields: null,
-			error: parseUsageError('Invalid --fields value', json, quiet, {
-				invalidFields,
-				validFieldsHint:
-					'Fields must be comma-separated dot paths (A-Z, a-z, 0-9, _, .).',
-			}),
+			error: parseUsageError(
+				`Invalid field names: ${invalidFields.join(', ')}. Allowed chars: A-Z, a-z, 0-9, dots, underscores.`,
+				json,
+				quiet,
+				{
+					invalidFields,
+					validFieldsHint:
+						'Fields are PascalCase dot paths (e.g., Contact.Name, BankTransactionID, LineItems.AccountCode). Use --help <command> to see available fields.',
+				},
+			),
 		}
 	}
 	return { fields: rawFields }

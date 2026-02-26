@@ -86,6 +86,28 @@ describe('cli output invariants', () => {
 	})
 })
 
+describe('--fields validation', () => {
+	it('rejects invalid field chars with LLM self-correction hint', () => {
+		const result = parseCli([
+			'node',
+			'xero-cli',
+			'accounts',
+			'--fields',
+			'Name,Bad Field!',
+			'--json',
+		])
+		expect(result.ok).toBe(false)
+		if (!result.ok) {
+			expect(result.message).toContain('Invalid field names')
+			expect(result.message).toContain('Bad Field!')
+			expect(result.context?.invalidFields).toEqual(['Bad Field!'])
+			expect(result.context?.validFieldsHint).toContain('PascalCase')
+			expect(result.context?.validFieldsHint).toContain('Contact.Name')
+			expect(result.context?.validFieldsHint).toContain('--help')
+		}
+	})
+})
+
 describe('--fields flag routing', () => {
 	it('rejects --fields for reconcile command', () => {
 		const result = parseCli(['node', 'xero-cli', 'reconcile', '--fields', 'Total', '--json'])
