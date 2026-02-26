@@ -91,6 +91,9 @@ function groupHistory(transactions: BankTransactionRecord[]): HistoryRow[] {
 	return Array.from(groups.values())
 }
 
+/** Logger for the history command handler. */
+const histLogger = getXeroLogger(['cli', 'history'])
+
 /** Group past reconciled transactions by contact + account code. */
 export async function runHistory(
 	ctx: OutputContext,
@@ -114,6 +117,14 @@ export async function runHistory(
 			return EXIT_UNAUTHORIZED
 		}
 
+		histLogger.debug(
+			'Fetching history: since={since} contact={contact} accountCode={accountCode}',
+			{
+				since: options.since,
+				contact: options.contact,
+				accountCode: options.accountCode,
+			},
+		)
 		const whereClauses = [
 			'IsReconciled==true',
 			`Date>=DateTime(${options.since.split('-').join(',')})`,
@@ -138,7 +149,11 @@ export async function runHistory(
 				eventsConfig: ctx.eventsConfig,
 			},
 		)
-		const grouped = groupHistory(response.BankTransactions ?? [])
+		const rawTransactions = response.BankTransactions ?? []
+		histLogger.debug('Fetched {count} raw transactions for grouping', {
+			count: rawTransactions.length,
+		})
+		const grouped = groupHistory(rawTransactions)
 		const projected = options.fields
 			? projectFields(
 					grouped as unknown as Record<string, unknown>[],

@@ -24,10 +24,17 @@ const SCHEMA_VERSION_OUTPUT = 1
 type LogLevel = 'silent' | 'info' | 'debug'
 type ProgressMode = 'animated' | 'static' | 'off'
 
-/** Shared context threaded through every command for output formatting. */
+/** Shared context threaded through every command for output formatting.
+ *
+ * `headless` is true when the CLI should avoid interactive behavior (e.g. no
+ * browser launch during auth). Derived from `--json`, non-TTY stdout, or
+ * the `XERO_HEADLESS=1` environment variable -- providing a single source of
+ * truth so commands never need to re-detect the environment themselves.
+ */
 export interface OutputContext {
 	readonly json: boolean
 	readonly quiet: boolean
+	readonly headless: boolean
 	readonly logLevel: LogLevel
 	readonly progressMode: ProgressMode
 	readonly eventsConfig: EventsConfig

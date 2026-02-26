@@ -6,6 +6,7 @@ import {
 	shutdownLogging,
 	withContext,
 } from '../logging'
+import { isHeadless } from '../xero/auth'
 import { runAccounts } from './commands/accounts'
 import { runAuth } from './commands/auth'
 import { runHistory } from './commands/history'
@@ -582,6 +583,7 @@ function resolveOutputMode(flags: {
 	return {
 		json,
 		quiet: flags.quiet,
+		headless: json || isHeadless(),
 		logLevel,
 		progressMode,
 		eventsConfig: resolveEventsConfig({ eventsUrl: flags.eventsUrl }),
@@ -650,6 +652,7 @@ export async function runCli(argv: readonly string[]): Promise<ExitCode> {
 		const ctx: OutputContext = {
 			json: parsed.json,
 			quiet: parsed.quiet,
+			headless: parsed.json || isHeadless(),
 			logLevel: 'silent',
 			progressMode: parsed.json || parsed.quiet ? 'off' : 'static',
 			eventsConfig: resolveEventsConfig(),
@@ -671,6 +674,7 @@ export async function runCli(argv: readonly string[]): Promise<ExitCode> {
 	const ctx: OutputContext = {
 		json: options.json,
 		quiet: options.quiet,
+		headless: options.headless,
 		logLevel: options.logLevel,
 		progressMode: options.progressMode,
 		eventsConfig: options.eventsConfig,
