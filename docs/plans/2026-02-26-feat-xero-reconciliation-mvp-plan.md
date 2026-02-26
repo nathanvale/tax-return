@@ -131,14 +131,15 @@ const response = await fetch(
 - **No reconciliation API** - Xero explicitly states "no immediate plans" to add this
 - **Workaround:** Create payments with `isReconciled: true`; Xero auto-matches when amount/date/bank account align with a bank feed line
 - **Bank Feeds API** is restricted to financial institutions - not available
-- **Rate limits:** 60 calls/min, 5,000/day per org, 5 concurrent requests
+- **Rate limits:** 60 calls/min, 5,000/day per org, 5 concurrent requests. Response headers `X-MinLimit-Remaining`, `X-DayLimit-Remaining`, `X-AppMinLimit-Remaining` report remaining quota -- use these for proactive throttling instead of only reacting to 429s.
 - **OAuth2:** 30-min access tokens, single-use refresh tokens (60-day expiry if unused)
 - **Granular scopes:** Apps created after 2 March 2026 need new scope format
 - **`IsReconciled` filter is not "optimised"** for high-volume orgs - always combine with Date range filter
 - **Overpayments via API return validation error** - can't overpay, must be exact or partial
 - **200 responses can contain validation errors** - always check `hasErrors` on results
-- **Batch limit:** 50 payments per POST request
-- **Pagination:** 100 items per page, no total count, increment until `length < 100`
+- **Batch limit:** Up to 50 items per POST request (practical ceiling -- max request size is 10MB). Applies to payments, invoices, contacts, etc.
+- **Pagination:** 100 items per page, no total count header -- increment page until `length < 100`. Supported on: invoices, credit notes, contacts, bank transactions, manual journals.
+- **200 responses can contain per-item validation errors** - always check `HasErrors` and `ValidationErrors` on each item in batch responses
 
 ### Research Insights: BankTransactions vs BankStatementLines
 
@@ -347,9 +348,21 @@ async function xeroFetch(path: string, options?: RequestInit): Promise<Response>
     if (response.status === 401) throw new XeroAuthError('Token expired - re-auth needed')
     if (response.status === 429 || response.status === 503) {
       const retryAfter = Number(response.headers.get('Retry-After') ?? 5)
-      throw new XeroApiError(`Rate limited (${response.status})`, { status: response.status, retryAfter })
+      const limitProblem = response.headers.get('X-Rate-Limit-Problem') ?? 'unknown'
+      throw new XeroApiError(`Rate limited (${response.status}, ${limitProblem})`, { status: response.status, retryAfter })
     }
     if (!response.ok) throw new XeroApiError(`API error: ${response.status}`, { status: response.status })
+
+    // Log remaining quota for proactive throttling awareness
+    const minRemaining = response.headers.get('X-MinLimit-Remaining')
+    const dayRemaining = response.headers.get('X-DayLimit-Remaining')
+    if (minRemaining && Number(minRemaining) < 10) {
+      console.warn(`Xero rate limit warning: ${minRemaining} calls remaining this minute`)
+    }
+    if (dayRemaining && Number(dayRemaining) < 100) {
+      console.warn(`Xero daily limit warning: ${dayRemaining} calls remaining today`)
+    }
+
     return response
   }, {
     maxAttempts: 3,
@@ -538,7 +551,7 @@ async function createPaymentsBatched(payments: PaymentInput[], batchSize = 50): 
 - After creating a payment, write to state file immediately via `saveJsonStateSync()` (verified atomic: temp file + rename)
 - On re-run, skip already-processed items and report them
 
-**Rate limiting:** No dedicated module. `xeroFetch()` has built-in retry for 429/503 (max 3 attempts via `retry()` from `@side-quest/core/utils`). `createPaymentsBatched()` adds batch-level retry with `isRetryableError` classifier for 429/500/503. Individual fallback only triggers on validation errors (400) and is throttled at ~55 req/min via `RATE_LIMIT_DELAY_MS` to stay under Xero's 60 req/min limit.
+**Rate limiting:** No dedicated module. `xeroFetch()` has built-in retry for 429/503 (max 3 attempts via `retry()` from `@side-quest/core/utils`) and reads `X-Rate-Limit-Problem` header to identify which limit was hit. It also reads `X-MinLimit-Remaining` and `X-DayLimit-Remaining` headers for proactive warnings when quota is low. `createPaymentsBatched()` adds batch-level retry with `isRetryableError` classifier for 429/500/503. Individual fallback only triggers on validation errors (400) and is throttled at ~55 req/min via `RATE_LIMIT_DELAY_MS` to stay under Xero's 60 req/min limit. When 429 is returned, the `Retry-After` header specifies how many seconds to wait before resuming.
 
 **Edge cases:**
 - Partial payments (amount < invoice) - export to CSV for manual review
