@@ -40,6 +40,11 @@ interface ConnectionResponse {
 	readonly tenantName: string
 }
 
+/** Check if running in a test environment (bun test sets NODE_ENV=test). */
+function isTestEnvironment(): boolean {
+	return process.env.NODE_ENV === 'test' || process.env.BUN_ENV === 'test'
+}
+
 function base64UrlEncode(data: Uint8Array): string {
 	return Buffer.from(data)
 		.toString('base64')
@@ -118,15 +123,21 @@ function classifyKeychainError(message: string): {
 
 async function readKeychain(): Promise<StoredTokens | null> {
 	if (process.env.XERO_TEST_TOKENS) {
-		try {
-			const parsed = JSON.parse(process.env.XERO_TEST_TOKENS) as StoredTokens
-			const validated = TokenSchema.safeParse(parsed)
-			if (!validated.success) {
-				throw new Error('Invalid token shape')
+		if (!isTestEnvironment()) {
+			console.warn(
+				'[xero-cli] XERO_TEST_TOKENS is set but NODE_ENV/BUN_ENV is not "test" -- ignoring for safety.',
+			)
+		} else {
+			try {
+				const parsed = JSON.parse(process.env.XERO_TEST_TOKENS) as StoredTokens
+				const validated = TokenSchema.safeParse(parsed)
+				if (!validated.success) {
+					throw new Error('Invalid token shape')
+				}
+				return validated.data
+			} catch {
+				throw new XeroAuthError('Invalid XERO_TEST_TOKENS payload')
 			}
-			return validated.data
-		} catch {
-			throw new XeroAuthError('Invalid XERO_TEST_TOKENS payload')
 		}
 	}
 	const proc = Bun.spawn([
@@ -152,7 +163,7 @@ async function readKeychain(): Promise<StoredTokens | null> {
 }
 
 async function writeKeychain(tokens: StoredTokens): Promise<void> {
-	if (process.env.XERO_TEST_TOKENS) return
+	if (process.env.XERO_TEST_TOKENS && isTestEnvironment()) return
 	const payload = JSON.stringify(tokens)
 	const proc = Bun.spawn([
 		'security',
@@ -177,7 +188,7 @@ async function writeKeychain(tokens: StoredTokens): Promise<void> {
 }
 
 async function deleteKeychain(): Promise<void> {
-	if (process.env.XERO_TEST_TOKENS) return
+	if (process.env.XERO_TEST_TOKENS && isTestEnvironment()) return
 	const proc = Bun.spawn([
 		'security',
 		'delete-generic-password',

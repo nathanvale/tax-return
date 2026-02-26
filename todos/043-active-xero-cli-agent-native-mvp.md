@@ -1,6 +1,6 @@
 ---
 title: "xero-cli agent-native MVP (auth + reconcile)"
-status: active
+status: complete
 created: 2026-02-26
 owner: nathanvale
 ---
