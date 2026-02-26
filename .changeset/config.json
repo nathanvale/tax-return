@@ -1,0 +1,15 @@
+{
+	"$schema": "https://unpkg.com/@changesets/config/schema.json",
+	"access": "public",
+	"baseBranch": "main",
+	"changelog": [
+		"@changesets/changelog-github",
+		{ "repo": "nathanvale/tax-return" }
+	],
+	"commit": false,
+	"packages": ["."],
+	"fixed": [],
+	"ignore": [],
+	"linked": [],
+	"updateInternalDependencies": "patch"
+}
