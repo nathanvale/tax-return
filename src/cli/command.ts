@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { resolveEventsConfig } from '../events'
+import { emitEvent, resolveEventsConfig } from '../events'
 import {
 	getXeroLogger,
 	setupLogging,
@@ -643,6 +643,13 @@ function sanitizeCliOptions(options: CliOptions): Record<string, unknown> {
 		progressMode,
 		...rest,
 	}
+}
+
+/** Derive the output mode label for events: json > quiet > human. */
+function resolveMode(ctx: OutputContext): 'json' | 'quiet' | 'human' {
+	if (ctx.json) return 'json'
+	if (ctx.quiet) return 'quiet'
+	return 'human'
 }
 
 /** Run the CLI and return an exit code for process exit. */

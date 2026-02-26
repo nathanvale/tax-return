@@ -1,6 +1,8 @@
 import { timingSafeEqual } from 'node:crypto'
 import { readFile, unlink, writeFile } from 'node:fs/promises'
 import { z } from 'zod'
+import type { EventsConfig } from '../events'
+import { emitEvent } from '../events'
 import { getXeroLogger } from '../logging'
 import { isProcessAlive } from '../util/process'
 import { loadEnvConfig, saveXeroConfig } from './config'

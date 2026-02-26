@@ -795,6 +795,12 @@ export async function runReconcile(
 		let processedCount = 0
 		const totalCount = inputs.length
 
+		emitEvent(ctx.eventsConfig, 'xero-reconcile-started', {
+			mode: options.execute ? 'execute' : 'dry-run',
+			total: totalCount,
+			fromCsv: options.fromCsv ?? null,
+		})
+
 		const reportResult = (result: ReconcileResult): void => {
 			if (ctx.json || ctx.quiet) return
 			let prefix = 'SKIP'

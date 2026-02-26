@@ -162,6 +162,15 @@ export async function xeroFetch<T>(
 								...getLogContext(),
 							},
 						)
+						emitEvent(
+							options.eventsConfig ?? { url: null },
+							'xero-rate-limited',
+							{
+								url: url.toString(),
+								retryAfterMs: backoff,
+								attempt,
+							},
+						)
 					} else {
 						apiLogger.info(
 							'Retrying after HTTP {status} in {backoff}ms (attempt={attempt})',
